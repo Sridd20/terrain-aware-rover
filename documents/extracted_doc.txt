@@ -1,0 +1,281 @@
+DEVELOPER-READY IMPLEMENTATION DOCUMENT
+Terrain-Aware Autonomous Rover
+Everything needed to start coding: wiring, module structure, formulas, constants, and pseudocode.
+Companion to: Design Requirements Document v1.0
+Team: 2 × EEE · 2 × CSE — MBCET
+
+1. Architecture at a Glance
+Two layers, connected over WiFi/MQTT:
+EE layer (on the rover): MPU6050 → ESP32 → L298N → 2× DC motors
+CS layer (laptop/Pi during development, optional once inference moves fully on-device): MQTT ingest → windowing → feature extraction → classifier → smoothing → speed policy → dashboard
+Target end-state: the classifier and control loop run entirely on the ESP32 (Section 5 covers exporting the trained model to C++). The laptop-side pipeline is used during development, data collection, and training, and optionally kept for the live dashboard.
+1.1 Repository layout
+/firmware        ESP32 C++ (Arduino/ESP-IDF) — sensing, control loop, on-device inference
+/ml              Python — feature extraction, training, model export
+/dashboard       Flask/Streamlit — live label, confidence, trace, speed
+/data            Collected + labelled vibration sessions (raw + processed)
+/docs            DRD, this document, test track photos, results
+2. Hardware Wiring
+2.1 Pin map (ESP32 DevKit V1)
+Signal
+ESP32 Pin
+Connects To
+Notes
+I2C SDA
+GPIO 21
+MPU6050 SDA
+Shared I2C bus
+I2C SCL
+GPIO 22
+MPU6050 SCL
+Shared I2C bus
+Right motor PWM
+GPIO 25 (ENA)
+L298N ENA
+PWM speed, right side
+Right motor IN1
+GPIO 26
+L298N IN1
+Direction
+Right motor IN2
+GPIO 27
+L298N IN2
+Direction
+Left motor PWM
+GPIO 14 (ENB)
+L298N ENB
+PWM speed, left side
+Left motor IN3
+GPIO 12
+L298N IN3
+Direction
+Left motor IN4
+GPIO 13
+L298N IN4
+Direction
+MPU6050 power
+3.3V / GND
+MPU6050 VCC/GND
+—
+L298N logic power
+5V (VIN) / GND
+L298N +5V / GND
+Motor supply from battery pack, not ESP32 5V pin
+Mounting note: bolt the MPU6050 rigidly to the chassis frame, near a wheel mount — not on foam tape or a loose breadboard. Compliant mounting low-pass-filters the signal and is the single biggest driver of classification accuracy.
+
+3. Firmware Module (ESP32 / C++)
+3.1 Sampling loop
+Sample the IMU at 100 Hz on a fixed timer. Maintain a circular buffer of the last 100 samples (1 second of data).
+const int WINDOW_SIZE = 100;      // 1s @ 100Hz
+float window[WINDOW_SIZE];
+int windowIdx = 0;
+const unsigned long SAMPLE_PERIOD_MS = 10;   // 100 Hz
+ 
+void loop() {
+  if (millis() - lastSample >= SAMPLE_PERIOD_MS) {
+    lastSample = millis();
+    float z = readAccelZ();               // from MPU6050
+    window[windowIdx % WINDOW_SIZE] = z;
+    windowIdx++;
+    if (windowIdx >= WINDOW_SIZE) runInferenceCycle();
+  }
+}
+3.2 Feature extraction (5-D vector)
+Computed once per window (every ~10 new samples for 50% overlap in the training pipeline; on-device this can run every window for simplicity).
+Feature
+Formula
+Why it matters
+std
+standard deviation of the window
+Primary discriminator — vibration intensity
+rms
+sqrt(mean(x²))
+Overall energy, orientation-independent
+peak
+max(|x|) / rms
+Impulsiveness — separates spiky gravel from smooth carpet
+p2p
+max(x) − min(x)
+Range of motion within the window
+zcr
+count of sign changes between consecutive samples
+Cheap proxy for dominant frequency
+void extractFeatures(float *buf, int n, float *out5) {
+  float mean = 0, sq = 0, mx = buf[0], mn = buf[0], rmsAcc = 0;
+  for (int i = 0; i < n; i++) {
+    mean += buf[i]; rmsAcc += buf[i] * buf[i];
+    if (buf[i] > mx) mx = buf[i];
+    if (buf[i] < mn) mn = buf[i];
+  }
+  mean /= n;
+  float rms = sqrt(rmsAcc / n);
+  for (int i = 0; i < n; i++) sq += (buf[i]-mean)*(buf[i]-mean);
+  float std = sqrt(sq / n);
+  float peak = rms > 0.001 ? max(fabs(mx), fabs(mn)) / rms : 0;
+  int zcr = 0;
+  for (int i = 0; i < n-1; i++) if (buf[i]*buf[i+1] < 0) zcr++;
+  out5[0]=std; out5[1]=peak; out5[2]=rms; out5[3]=mx-mn; out5[4]=(float)zcr;
+}
+3.3 Classifier integration
+The trained scikit-learn decision tree is exported to a C++ header (see Section 5.3) and included directly in firmware:
+#include "terrain_classifier.h"
+Eloquent::ML::Port::DecisionTree clf;
+ 
+const char* label = clf.predictLabel(features);   // "tile" | "mat" | "carpet" | "gravel"
+Do not hand-edit this header. Regenerate it whenever the model is retrained (Section 5.4).
+3.4 Smoothing (majority vote)
+const int VOTE_WINDOW = 5;
+char* voteBuf[VOTE_WINDOW];
+int voteIdx = 0;
+ 
+voteBuf[voteIdx % VOTE_WINDOW] = label;
+voteIdx++;
+char* smoothedLabel = majorityOf(voteBuf, min(voteIdx, VOTE_WINDOW));
+
+3.5 Driving profile lookup
+Each smoothed label maps to a full driving profile — not just a speed value. Acceleration ramp is the commanded proxy for torque (no current sensor in this build).
+Terrain
+PWM (0–255)
+Accel. ramp
+Turn gain
+Tile
+220
+0.2 s
+1.0
+Mat
+190
+0.3 s
+0.9
+Carpet
+170
+0.4 s
+0.8
+Gravel
+130
+0.6 s
+0.6
+struct Profile { int pwm; float rampSec; float turnGain; };
+Profile PROFILES[4] = {
+  {220, 0.2, 1.0},  // tile
+  {190, 0.3, 0.9},  // mat
+  {170, 0.4, 0.8},  // carpet
+  {130, 0.6, 0.6},  // gravel
+};
+// apply via slew-rate-limited PWM ramp toward PROFILES[i].pwm
+// scale left/right differential by PROFILES[i].turnGain when turning
+3.6 Slope-handling state machine
+Pitch is computed from the accelerometer's gravity vector: pitch = atan2(-ax, sqrt(ay² + az²)).
+State
+Entry Condition
+Action
+Exit → Next State
+NORMAL
+default
+Apply terrain-classified profile (3.5)
+pitch > 6° → DETECT
+DETECT
+pitch > 6°
+Hold heading, sample pitch briefly
+pitch < 12° → CLIMB
+pitch ≥ 12° → RETREAT
+RETREAT
+steep slope confirmed
+Reverse ~15–20 cm
+distance reached → APPROACH
+APPROACH
+after retreat
+Fastest accel. ramp, max PWM, turn gain locked low
+pitch confirms incline → CLIMB
+CLIMB
+on incline (mild or steep path)
+Elevated PWM, minimal turning
+pitch < 2° → NORMAL
+enum SlopeState { NORMAL, DETECT, RETREAT, APPROACH, CLIMB };
+SlopeState state = NORMAL;
+const float DETECT_DEG = 6.0, STEEP_DEG = 12.0, FLAT_DEG = 2.0;
+const float RETREAT_CM = 17.5;   // midpoint of 15-20cm range, tune on hardware
+3.7 MQTT topics
+Topic
+Direction
+Payload
+rover/imu
+ESP32 → laptop
+Raw/windowed accel+gyro samples (dev/training only)
+rover/state
+ESP32 → laptop
+Current label, confidence, PWM, slope state — feeds dashboard
+rover/cmd
+laptop → ESP32
+Override PWM set-point (used only if inference is off-device)
+
+4. ML Training Pipeline (Python)
+4.1 Data collection protocol
+4 classes: tile, mat, carpet, gravel
+4 × 3-minute sessions per class, on separate days — not one long run
+3 PWM levels (low/med/high) per class, so the model learns terrain, not speed
+Split by session, not by window — train on sessions 1–3, hold out session 4 (prevents inflated accuracy from overlapping windows leaking into test)
+4.2 Feature extraction (Python, mirrors Section 3.2)
+def extract_features(sig):
+    std = sig.std()
+    rms = np.sqrt((sig**2).mean())
+    peak = np.abs(sig).max() / rms if rms > 1e-3 else 0
+    p2p = sig.max() - sig.min()
+    zcr = ((sig[:-1] * sig[1:]) < 0).sum()
+    return [std, peak, rms, p2p, zcr]
+4.3 Model selection
+Start with DecisionTreeClassifier(max_depth=5) — interpretable, prints as a readable tree
+Compare against KNN (k=5) and RandomForest (100 trees) via session-wise cross-validation
+Pick the simplest model within ~2% of the best accuracy
+Report a confusion matrix — expect carpet/mat to be the most confusable pair
+4.4 Exporting to C++
+Use micromlgen (or scikit-learn's own tree export, hand-adapted) to convert the trained tree into the header used in Section 3.3:
+from micromlgen import port
+cpp_code = port(clf, classmap={0:'tile', 1:'mat', 2:'carpet', 3:'gravel'})
+with open('terrain_classifier.h', 'w') as f:
+    f.write(cpp_code)
+Regenerate and replace firmware/terrain_classifier.h every time the model is retrained on new data. Do not hand-edit the generated header.
+
+5. Dashboard Module
+Subscribes to rover/state over MQTT. Minimum required views:
+Live accelerometer trace (scrolling, last ~3 seconds)
+Current predicted label + confidence
+Current PWM / speed and active driving profile
+Slope state indicator (NORMAL / DETECT / RETREAT / APPROACH / CLIMB)
+Suggested stack: Flask + Chart.js, or Streamlit for faster iteration. Update rate: match MQTT message rate, no additional polling needed.
+6. Constants Quick Reference
+Constant
+Value
+Where used
+Sample rate
+100 Hz
+Firmware sampling loop (3.1)
+Window size / overlap
+1 s / 50%
+Feature extraction (3.2, 4.2)
+Vote window
+5 predictions
+Smoothing (3.4)
+Tree depth
+5
+Model training (4.3)
+Slope detect threshold
+~6° pitch
+Slope state machine (3.6)
+Slope steep threshold
+~12° pitch
+Slope state machine (3.6)
+Slope flat (resume) threshold
+~2° pitch
+Slope state machine (3.6)
+Retreat distance
+15–20 cm
+RETREAT state (3.6)
+PWM range
+130–220 (of 255)
+Driving profile (3.5)
+Accel. ramp range
+0.2–0.6 s
+Driving profile (3.5)
+All thresholds above are initial estimates carried over from the design phase (see DRD, Section 5.2) and should be tuned once real hardware data is available — particularly the pitch thresholds and retreat distance, which were never measured on a physical slope.
+
+Next steps for whoever picks this up: (1) wire hardware per Section 2, (2) flash a minimal firmware that just streams IMU data over MQTT, (3) run the data collection protocol (4.1), (4) train + export the classifier (4.3–4.4), (5) integrate the generated header and driving profile into firmware, (6) bring up the dashboard, (7) validate against the DRD's acceptance criteria.
