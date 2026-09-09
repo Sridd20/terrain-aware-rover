@@ -167,6 +167,62 @@ MJCF_TEMPLATE = """
 </mujoco>
 """
 
+# Multi-terrain template: {seg_assets} and {seg_geoms} are injected per segment.
+MJCF_MULTI_TERRAIN = """
+<mujoco model="terrain_rover">
+  <option timestep="{dt}" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>
+  <default>
+    <geom solref="0.008 1" solimp="0.9 0.95 0.001"/>
+  </default>
+  <asset>
+{seg_assets}
+    <material name="mat_chassis" rgba="0.2 0.55 0.35 1"/>
+    <material name="mat_wheel"   rgba="0.15 0.15 0.15 1"/>
+  </asset>
+  <worldbody>
+    <light directional="true" pos="0 0 3" dir="0 0 -1"/>
+{seg_geoms}
+    <body name="chassis" pos="{start_x} 0 0.16">
+      <freejoint/>
+      <geom name="chassis_geom" type="box" size="0.09 0.06 0.02" mass="0.4" material="mat_chassis"/>
+      <site name="imu_site" pos="0.05 0.04 0.02" size="0.005"/>
+
+      <body name="wheel_fl" pos="0.07 0.075 -0.05">
+        <joint name="j_fl" type="hinge" axis="0 1 0" damping="0.02"/>
+        <geom name="g_fl" type="cylinder" size="0.035 0.014" euler="90 0 0"
+              mass="0.05" material="mat_wheel" friction="1.0 0.06 0.01"/>
+      </body>
+      <body name="wheel_fr" pos="0.07 -0.075 -0.05">
+        <joint name="j_fr" type="hinge" axis="0 1 0" damping="0.02"/>
+        <geom name="g_fr" type="cylinder" size="0.035 0.014" euler="90 0 0"
+              mass="0.05" material="mat_wheel" friction="1.0 0.06 0.01"/>
+      </body>
+      <body name="wheel_rl" pos="-0.07 0.075 -0.05">
+        <joint name="j_rl" type="hinge" axis="0 1 0" damping="0.02"/>
+        <geom name="g_rl" type="cylinder" size="0.035 0.014" euler="90 0 0"
+              mass="0.05" material="mat_wheel" friction="1.0 0.06 0.01"/>
+      </body>
+      <body name="wheel_rr" pos="-0.07 -0.075 -0.05">
+        <joint name="j_rr" type="hinge" axis="0 1 0" damping="0.02"/>
+        <geom name="g_rr" type="cylinder" size="0.035 0.014" euler="90 0 0"
+              mass="0.05" material="mat_wheel" friction="1.0 0.06 0.01"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <velocity name="act_left"  joint="j_fl" kv="0.05"/>
+    <velocity name="act_left2" joint="j_rl" kv="0.05"/>
+    <velocity name="act_right" joint="j_fr" kv="0.05"/>
+    <velocity name="act_right2" joint="j_rr" kv="0.05"/>
+  </actuator>
+
+  <sensor>
+    <accelerometer name="imu_acc" site="imu_site"/>
+  </sensor>
+</mujoco>
+"""
+
 
 def build_model(terrain_key, start_x):
     p = TERRAIN_PARAMS[terrain_key]
@@ -181,49 +237,69 @@ def build_model(terrain_key, start_x):
 
 
 def build_mixed_terrain_model(segment_order, start_x=-HF_SIZE_X + 0.4):
-    """Build a MuJoCo model whose heightfield stitches `segment_order` terrain types
-    end-to-end along the X (travel) axis, with a short cosine cross-fade at each
-    boundary so there is no hard step."""
+    """Build a MuJoCo model with N separately colored hfield geoms, one per terrain
+    segment, placed end-to-end along the X axis. Each segment uses its terrain's
+    TERRAIN_COLOR so the surface is visually color-coded in the viewer."""
     n_seg = len(segment_order)
-    blend_w = 3  # columns of cosine cross-fade at each segment boundary
-    max_elev = max(TERRAIN_PARAMS[k]["elev_m"] for k in segment_order)
+    blend_w = 3          # blend columns at each boundary
+    seg_hx = HF_SIZE_X / n_seg   # X half-extent of each segment (metres)
 
-    combined = np.zeros((HF_NROW, HF_NCOL))
-    col_bounds = []
+    seg_assets = ""
+    seg_geoms  = ""
+    seg_data   = []   # list of (hf_normalised, ncol) per segment
 
-    # First pass: fill each column slice with its terrain noise, scaled to elevation
+    prev_right_col = None
+
     for i, key in enumerate(segment_order):
+        p    = TERRAIN_PARAMS[key]
         col_start = i * (HF_NCOL // n_seg)
-        col_end = ((i + 1) * (HF_NCOL // n_seg)) if i < n_seg - 1 else HF_NCOL
-        col_bounds.append((col_start, col_end))
-        p = TERRAIN_PARAMS[key]
-        width = col_end - col_start
-        hf = band_limited_heightfield(HF_NROW, width, p["center_freq"],
-                                       p["bandwidth"], p["seed"] + i * 31)
-        combined[:, col_start:col_end] = hf * (p["elev_m"] / max_elev)
+        col_end   = ((i + 1) * (HF_NCOL // n_seg)) if i < n_seg - 1 else HF_NCOL
+        ncol = col_end - col_start
 
-    # Second pass: short cosine blend at each internal boundary
-    for i in range(1, n_seg):
-        boundary = col_bounds[i][0]
-        left_col = boundary - 1          # last column of previous segment (anchor)
-        n_blend = min(blend_w, col_bounds[i][1] - boundary)
-        for b in range(n_blend):
-            alpha = (b + 1) / (n_blend + 1)  # rises from ~0 to ~1 over blend_w cols
-            combined[:, boundary + b] = (
-                (1 - alpha) * combined[:, left_col] +
-                alpha * combined[:, boundary + b]
-            )
+        hf = band_limited_heightfield(HF_NROW, ncol, p["center_freq"],
+                                      p["bandwidth"], p["seed"] + i * 31)
+        hf = hf * p["elev_m"]   # scale to real elevation (metres)
 
-    # Normalise to [0, 1] for MuJoCo hfield_data
-    combined -= combined.min()
-    combined /= (combined.max() + 1e-9)
+        # Short cosine blend on the left edge so seams are smooth
+        if prev_right_col is not None:
+            for b in range(min(blend_w, ncol)):
+                alpha = (b + 1) / (blend_w + 1)
+                hf[:, b] = (1 - alpha) * prev_right_col + alpha * hf[:, b]
+        prev_right_col = hf[:, -1].copy()
 
-    xml = MJCF_TEMPLATE.format(
-        dt=PHYSICS_DT, nrow=HF_NROW, ncol=HF_NCOL,
-        hx=HF_SIZE_X, hy=HF_SIZE_Y, elev=max_elev, start_x=start_x,
+        # Normalise to [0, 1] for MuJoCo hfield_data
+        hf_norm = hf - hf.min()
+        hf_norm /= (hf_norm.max() + 1e-9)
+        seg_data.append((hf_norm, ncol))
+
+        # Build per-segment MJCF snippets
+        c    = TERRAIN_COLORS[key]
+        rgba = f"{c[0]} {c[1]} {c[2]} {c[3]}"
+        cx   = -HF_SIZE_X + seg_hx * (2 * i + 1)   # segment centre X
+
+        seg_assets += (
+            f'    <hfield name="hf_{i}" nrow="{HF_NROW}" ncol="{ncol}"'
+            f' size="{seg_hx:.4f} {HF_SIZE_Y} {p["elev_m"]} 0.02"/>\n'
+            f'    <material name="mat_seg_{i}" rgba="{rgba}"/>\n'
+        )
+        seg_geoms += (
+            f'    <geom name="ground_{i}" type="hfield" hfield="hf_{i}"'
+            f' material="mat_seg_{i}" friction="1.0 0.06 0.01"'
+            f' pos="{cx:.4f} 0 0"/>\n'
+        )
+
+    xml = MJCF_MULTI_TERRAIN.format(
+        dt=PHYSICS_DT, start_x=start_x,
+        seg_assets=seg_assets, seg_geoms=seg_geoms,
     )
     model = mujoco.MjModel.from_xml_string(xml)
-    model.hfield_data[:] = combined.flatten()
+
+    # Write each segment's normalised heightfield into the correct hfield_data offset
+    for i, (hf_norm, ncol) in enumerate(seg_data):
+        hf_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_HFIELD, f"hf_{i}")
+        adr   = model.hfield_adr[hf_id]
+        model.hfield_data[adr: adr + HF_NROW * ncol] = hf_norm.flatten()
+
     return model
 
 
@@ -320,9 +396,6 @@ def view_terrain(terrain_key, pwm=80, speed_ms=None, sim_speed=1):
     else:
         omega = pwm * PWM_TO_OMEGA
     data.ctrl[:] = [omega, omega, omega, omega]
-    # Set chassis to the terrain's colour (static, since terrain is fixed)
-    chassis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "chassis_geom")
-    model.geom_rgba[chassis_id] = TERRAIN_COLORS[terrain_key]
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():
             for _ in range(sim_speed):   # multiple steps per render frame
@@ -431,9 +504,6 @@ def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1):
             "carpet": "\033[93m", "gravel": "\033[91m"}
     _RST = "\033[0m"
     _frame = 0
-    # Resolve chassis geom index once for live colour updates
-    _chassis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "chassis_geom")
-    _prev_label = None
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():
@@ -453,10 +523,6 @@ def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1):
 
             # Throttle terminal print (every 25 frames) to avoid spam at high speed
             _frame += 1
-            # Update chassis colour whenever the terrain label changes
-            if label != _prev_label:
-                model.geom_rgba[_chassis_id] = TERRAIN_COLORS[label]
-                _prev_label = label
             if _frame % 25 == 0:
                 print(
                     f"\rt={data.time:7.2f}s | "
