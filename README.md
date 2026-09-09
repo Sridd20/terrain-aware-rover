@@ -117,6 +117,77 @@ python terrain_sim.py --view gravel --pwm 25 # interactive 3D viewer (--pwm ≤ 
 
 ---
 
+## Adaptive Mixed-Terrain Simulation
+
+`terrain_sim.py` now supports a **mixed-terrain track** mode where the rover drives over multiple surface types in random order and adapts its speed and motor torque in real-time — purely from IMU vibration, with no terrain label fed to the controller.
+
+### How it works
+
+```
+[MPU6050 Z-axis accel, rolling 50-sample buffer]
+        ↓
+   gravity-bias removal (subtract median)
+        ↓
+   vibration RMS  (re-computed every 25 physics steps ≈ 50 ms)
+        ↓
+   low-pass smoothed  (α = 0.20, prevents flickering at transitions)
+        ↓
+   roughness classify  →  speed + motor-gain lookup
+        ↓
+   update wheel velocity targets + actuator kv
+```
+
+The controller is **entirely blind** — it never receives the terrain label, only what the IMU feels.
+
+### Adaptive Policy Table
+
+| Terrain (inferred) | RMS threshold (m/s²) | Target speed | Motor gain (kv) |
+|--------------------|----------------------|--------------|-----------------|
+| tile               | < 0.10               | 0.55 m/s     | 0.08 (fast)     |
+| mat                | 0.10 – 0.25          | 0.40 m/s     | 0.06            |
+| carpet             | 0.25 – 0.55          | 0.28 m/s     | 0.05            |
+| gravel             | ≥ 0.55               | 0.18 m/s     | 0.04 (careful)  |
+
+Softer motor gain on rough terrain prevents the numerical instability (`Nan/Inf QACC`) that occurs at high wheel speeds over coarse surfaces.
+
+### Track generation
+
+The heightfield is split into N equal segments along the X (travel) axis. Each segment is filled with a different terrain's band-limited noise profile, scaled to its elevation, with a 3-column cosine cross-fade at each boundary. The rover **loops continuously** — when it reaches the far end it is teleported back to the start.
+
+### Running the adaptive viewer
+
+```bash
+# Random track (different every run)
+python terrain_sim.py --view-adaptive
+
+# Reproducible track with fixed seed
+python terrain_sim.py --view-adaptive --seed 42
+
+# More segments (default is 6)
+python terrain_sim.py --view-adaptive --segments 8
+```
+
+**Terminal output while running:**
+```
+Track (6 segments): tile -> gravel -> carpet -> mat -> mat -> gravel
+Controller: BLIND (IMU only)  |  Looping: yes
+
+t=  2.14s | RMS=0.082 | terrain->tile    | speed=0.55 m/s
+t=  4.30s | RMS=0.499 | terrain->carpet  | speed=0.28 m/s
+t=  4.35s | RMS=1.134 | terrain->gravel  | speed=0.18 m/s
+```
+
+### Running all 4 single-terrain viewers simultaneously
+
+```powershell
+Start-Process python -ArgumentList "terrain_sim.py --view tile   --pwm 25 --speed 0.8"
+Start-Process python -ArgumentList "terrain_sim.py --view mat    --pwm 25 --speed 0.8"
+Start-Process python -ArgumentList "terrain_sim.py --view carpet --pwm 25 --speed 0.8"
+Start-Process python -ArgumentList "terrain_sim.py --view gravel --pwm 25 --speed 0.8"
+```
+
+---
+
 ## Key Constants
 
 | Constant | Value | Location |

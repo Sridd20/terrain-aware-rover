@@ -25,6 +25,7 @@ Run:
 """
 
 import argparse
+from collections import deque
 import numpy as np
 import mujoco
 
@@ -61,6 +62,25 @@ PWM_LEVELS = {
     "gravel": [100, 130, 165],
 }
 PWM_TO_OMEGA = 15.0 / 255.0  # rad/s per PWM unit (wheel radius 0.035m -> ~0.9 m/s top speed)
+
+# ----------------------------------------------------------------------
+# Adaptive control policy: terrain roughness -> (target speed m/s, motor kv)
+# Rougher terrain gets slower speed + softer motor gain to avoid QACC instability.
+# ----------------------------------------------------------------------
+ADAPTIVE_POLICY = {
+    "tile":   (0.55, 0.08),
+    "mat":    (0.40, 0.06),
+    "carpet": (0.28, 0.05),
+    "gravel": (0.18, 0.04),
+}
+
+# Rolling RMS thresholds (gravity-bias-removed Z accel, m/s²) for blind classification
+RMS_THRESHOLDS = [
+    (0.10, "tile"),
+    (0.25, "mat"),
+    (0.55, "carpet"),
+    (float("inf"), "gravel"),
+]
 
 
 def band_limited_heightfield(nrow, ncol, center_freq, bandwidth, seed):
@@ -152,15 +172,68 @@ def build_model(terrain_key, start_x):
     return model
 
 
+def build_mixed_terrain_model(segment_order, start_x=-HF_SIZE_X + 0.4):
+    """Build a MuJoCo model whose heightfield stitches `segment_order` terrain types
+    end-to-end along the X (travel) axis, with a short cosine cross-fade at each
+    boundary so there is no hard step."""
+    n_seg = len(segment_order)
+    blend_w = 3  # columns of cosine cross-fade at each segment boundary
+    max_elev = max(TERRAIN_PARAMS[k]["elev_m"] for k in segment_order)
+
+    combined = np.zeros((HF_NROW, HF_NCOL))
+    col_bounds = []
+
+    # First pass: fill each column slice with its terrain noise, scaled to elevation
+    for i, key in enumerate(segment_order):
+        col_start = i * (HF_NCOL // n_seg)
+        col_end = ((i + 1) * (HF_NCOL // n_seg)) if i < n_seg - 1 else HF_NCOL
+        col_bounds.append((col_start, col_end))
+        p = TERRAIN_PARAMS[key]
+        width = col_end - col_start
+        hf = band_limited_heightfield(HF_NROW, width, p["center_freq"],
+                                       p["bandwidth"], p["seed"] + i * 31)
+        combined[:, col_start:col_end] = hf * (p["elev_m"] / max_elev)
+
+    # Second pass: short cosine blend at each internal boundary
+    for i in range(1, n_seg):
+        boundary = col_bounds[i][0]
+        left_col = boundary - 1          # last column of previous segment (anchor)
+        n_blend = min(blend_w, col_bounds[i][1] - boundary)
+        for b in range(n_blend):
+            alpha = (b + 1) / (n_blend + 1)  # rises from ~0 to ~1 over blend_w cols
+            combined[:, boundary + b] = (
+                (1 - alpha) * combined[:, left_col] +
+                alpha * combined[:, boundary + b]
+            )
+
+    # Normalise to [0, 1] for MuJoCo hfield_data
+    combined -= combined.min()
+    combined /= (combined.max() + 1e-9)
+
+    xml = MJCF_TEMPLATE.format(
+        dt=PHYSICS_DT, nrow=HF_NROW, ncol=HF_NCOL,
+        hx=HF_SIZE_X, hy=HF_SIZE_Y, elev=max_elev, start_x=start_x,
+    )
+    model = mujoco.MjModel.from_xml_string(xml)
+    model.hfield_data[:] = combined.flatten()
+    return model
+
+
 # ----------------------------------------------------------------------
 # 3. Rollout: drive the rover, record the accelerometer
 # ----------------------------------------------------------------------
-def run_rollout(terrain_key, pwm, duration_s=6.0, settle_s=0.5):
+WHEEL_RADIUS = 0.035  # meters, matches geom size in MJCF_TEMPLATE
+
+
+def run_rollout(terrain_key, pwm, duration_s=6.0, settle_s=0.5, speed_ms=None):
     start_x = -HF_SIZE_X + 0.4  # start near the left edge of the field, drive +x
     model = build_model(terrain_key, start_x)
     data = mujoco.MjData(model)
 
-    omega = pwm * PWM_TO_OMEGA
+    if speed_ms is not None:
+        omega = speed_ms / WHEEL_RADIUS  # v = omega * r  ->  omega = v / r
+    else:
+        omega = pwm * PWM_TO_OMEGA
     data.ctrl[:] = [omega, omega, omega, omega]
 
     steps_per_sample = int(round(1.0 / SR / PHYSICS_DT))
@@ -230,11 +303,14 @@ def build_dataset(duration_s=6.0, overlap=0.5, out_csv="dataset.csv"):
 # ----------------------------------------------------------------------
 # 6. Optional: interactive viewer (desktop, needs a display)
 # ----------------------------------------------------------------------
-def view_terrain(terrain_key, pwm=80):
+def view_terrain(terrain_key, pwm=80, speed_ms=None):
     import mujoco.viewer
     model = build_model(terrain_key, -HF_SIZE_X + 0.4)
     data = mujoco.MjData(model)
-    omega = pwm * PWM_TO_OMEGA
+    if speed_ms is not None:
+        omega = speed_ms / WHEEL_RADIUS
+    else:
+        omega = pwm * PWM_TO_OMEGA
     data.ctrl[:] = [omega, omega, omega, omega]
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():
@@ -242,17 +318,155 @@ def view_terrain(terrain_key, pwm=80):
             viewer.sync()
 
 
+# ----------------------------------------------------------------------
+# 7. Blind adaptive controller (reads only IMU, knows nothing about terrain)
+# ----------------------------------------------------------------------
+class AdaptiveController:
+    """
+    Closed-loop terrain-adaptive speed and torque controller.
+
+    Every `control_every` physics steps it:
+      1. Computes a rolling RMS of the gravity-bias-removed Z accelerometer signal
+      2. Low-pass smooths to suppress transition spikes
+      3. Classifies terrain from RMS alone (tile / mat / carpet / gravel)
+      4. Applies the matching speed + motor-gain from ADAPTIVE_POLICY
+
+    The controller is entirely blind — it never receives the terrain label.
+    """
+
+    def __init__(self, model, data, window=50, alpha=0.20, control_every=25,
+                 settle_steps=250):
+        self.data = data
+        self.model = model
+        self.window = window
+        self.alpha = alpha           # low-pass smoothing factor
+        self.control_every = control_every
+        self.settle_steps = settle_steps  # physics steps before control activates (~0.5 s)
+        self._buf = deque(maxlen=window)
+        self._smooth_rms = 0.0
+        self._step_count = 0
+        self.label = "tile"          # current terrain estimate
+        self.speed = ADAPTIVE_POLICY["tile"][0]
+        self._apply("tile")          # safe starting defaults
+
+    def step(self):
+        """Call once per physics step. Records IMU, ticks control. Returns label."""
+        self._buf.append(float(self.data.sensordata[2]))  # Z-axis accel
+        self._step_count += 1
+
+        # Settle period: rover lands on terrain; don't classify yet to avoid spike
+        if self._step_count < self.settle_steps:
+            return self.label
+
+        # Immediately after settle: seed smooth_rms from a clean buffer
+        if self._step_count == self.settle_steps:
+            self._buf.clear()        # flush spike data
+            self._smooth_rms = 0.0  # will re-bootstrap over next control ticks
+            return self.label
+
+        if self._step_count % self.control_every == 0:
+            rms = self._rms()
+            self._smooth_rms = self.alpha * rms + (1.0 - self.alpha) * self._smooth_rms
+            self.label = self._classify(self._smooth_rms)
+            self.speed = ADAPTIVE_POLICY[self.label][0]
+            self._apply(self.label)
+        return self.label
+
+    def _rms(self):
+        if len(self._buf) < 5:
+            return 0.0
+        arr = np.array(self._buf, dtype=np.float64)
+        arr -= np.median(arr)        # remove gravity bias
+        return float(np.sqrt((arr ** 2).mean()))
+
+    def _classify(self, rms):
+        for threshold, label in RMS_THRESHOLDS:
+            if rms < threshold:
+                return label
+        return "gravel"
+
+    def _apply(self, label):
+        speed, kv = ADAPTIVE_POLICY[label]
+        omega = speed / WHEEL_RADIUS
+        self.data.ctrl[:] = [omega, omega, omega, omega]
+        # Soften motor gain on rough terrain to prevent QACC blow-up
+        for i in range(self.model.nu):
+            self.model.actuator_gainprm[i, 0] = kv
+            self.model.actuator_biasprm[i, 1] = -kv   # velocity actuator bias
+
+
+def view_mixed_terrain(seed=None, n_segments=6):
+    """Launch the MuJoCo viewer with a randomly ordered mixed-terrain track.
+    The rover loops continuously; the adaptive controller adjusts speed/torque
+    in real-time from IMU vibration alone."""
+    import mujoco.viewer
+
+    rng = np.random.default_rng(seed)
+    terrain_keys = list(TERRAIN_PARAMS.keys())
+    segment_order = rng.choice(terrain_keys, size=n_segments, replace=True).tolist()
+
+    print(f"\nTrack ({n_segments} segments): {' -> '.join(segment_order)}")
+    print("Controller: BLIND (IMU only)  |  Looping: yes\n")
+
+    start_x = -HF_SIZE_X + 0.4
+    model = build_mixed_terrain_model(segment_order, start_x=start_x)
+    data  = mujoco.MjData(model)
+    ctrl  = AdaptiveController(model, data)
+
+    # ANSI colours for terminal label display
+    _CLR = {"tile": "\033[96m", "mat": "\033[92m",
+            "carpet": "\033[93m", "gravel": "\033[91m"}
+    _RST = "\033[0m"
+
+    with mujoco.viewer.launch_passive(model, data) as viewer:
+        while viewer.is_running():
+            mujoco.mj_step(model, data)
+            label = ctrl.step()
+
+            # Loop: teleport rover back to start when it reaches the far end
+            if data.qpos[0] > HF_SIZE_X - 0.3:
+                data.qpos[0]   = start_x
+                data.qpos[1]   = 0.0
+                data.qpos[2]   = 0.16
+                data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]  # identity quaternion
+                data.qvel[0:6] = 0.0                     # zero body velocity
+                mujoco.mj_forward(model, data)           # recompute contacts
+
+            print(
+                f"\rt={data.time:7.2f}s | "
+                f"RMS={ctrl._smooth_rms:.3f} | "
+                f"terrain->{_CLR.get(label,'')}{label:7s}{_RST} | "
+                f"speed={ctrl.speed:.2f} m/s",
+                end="", flush=True,
+            )
+            viewer.sync()
+
+
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Terrain-aware rover simulator. Use --view for a single terrain, "
+                    "--view-adaptive for a random mixed-terrain track with live adaptive control."
+    )
     ap.add_argument("--view", choices=list(TERRAIN_PARAMS.keys()), default=None,
-                     help="open interactive viewer on this terrain instead of building a dataset")
+                     help="Open interactive viewer on a single terrain (fixed speed).")
     ap.add_argument("--pwm", type=int, default=80,
-                     help="PWM level for the viewer (0-255, lower = slower). Default: 80")
-    ap.add_argument("--duration", type=float, default=6.0, help="seconds of driving per (terrain, pwm) run")
+                     help="PWM level for --view mode (0-255). Default: 80.")
+    ap.add_argument("--speed", type=float, default=None,
+                     help="Target wheel speed in m/s for --view mode (overrides --pwm).")
+    ap.add_argument("--view-adaptive", action="store_true",
+                     help="Launch mixed random-terrain track with blind adaptive control.")
+    ap.add_argument("--segments", type=int, default=6,
+                     help="Number of terrain segments in the adaptive track. Default: 6.")
+    ap.add_argument("--seed", type=int, default=None,
+                     help="Random seed for segment order (omit for a different track each run).")
+    ap.add_argument("--duration", type=float, default=6.0,
+                     help="Seconds of driving per (terrain, pwm) run (dataset mode only).")
     ap.add_argument("--out", default="dataset.csv")
     args = ap.parse_args()
 
-    if args.view:
-        view_terrain(args.view, pwm=args.pwm)
+    if args.view_adaptive:
+        view_mixed_terrain(seed=args.seed, n_segments=args.segments)
+    elif args.view:
+        view_terrain(args.view, pwm=args.pwm, speed_ms=args.speed)
     else:
         build_dataset(duration_s=args.duration, out_csv=args.out)
