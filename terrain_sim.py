@@ -303,7 +303,7 @@ def build_dataset(duration_s=6.0, overlap=0.5, out_csv="dataset.csv"):
 # ----------------------------------------------------------------------
 # 6. Optional: interactive viewer (desktop, needs a display)
 # ----------------------------------------------------------------------
-def view_terrain(terrain_key, pwm=80, speed_ms=None):
+def view_terrain(terrain_key, pwm=80, speed_ms=None, sim_speed=1):
     import mujoco.viewer
     model = build_model(terrain_key, -HF_SIZE_X + 0.4)
     data = mujoco.MjData(model)
@@ -314,7 +314,8 @@ def view_terrain(terrain_key, pwm=80, speed_ms=None):
     data.ctrl[:] = [omega, omega, omega, omega]
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():
-            mujoco.mj_step(model, data)
+            for _ in range(sim_speed):   # multiple steps per render frame
+                mujoco.mj_step(model, data)
             viewer.sync()
 
 
@@ -395,10 +396,11 @@ class AdaptiveController:
             self.model.actuator_biasprm[i, 1] = -kv   # velocity actuator bias
 
 
-def view_mixed_terrain(seed=None, n_segments=6):
+def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1):
     """Launch the MuJoCo viewer with a randomly ordered mixed-terrain track.
     The rover loops continuously; the adaptive controller adjusts speed/torque
-    in real-time from IMU vibration alone."""
+    in real-time from IMU vibration alone.
+    sim_speed: number of physics steps per render frame (>1 = faster than real-time)."""
     import mujoco.viewer
 
     rng = np.random.default_rng(seed)
@@ -406,7 +408,7 @@ def view_mixed_terrain(seed=None, n_segments=6):
     segment_order = rng.choice(terrain_keys, size=n_segments, replace=True).tolist()
 
     print(f"\nTrack ({n_segments} segments): {' -> '.join(segment_order)}")
-    print("Controller: BLIND (IMU only)  |  Looping: yes\n")
+    print(f"Controller: BLIND (IMU only)  |  Looping: yes  |  Speed: {sim_speed}x\n")
 
     start_x = -HF_SIZE_X + 0.4
     model = build_mixed_terrain_model(segment_order, start_x=start_x)
@@ -417,28 +419,34 @@ def view_mixed_terrain(seed=None, n_segments=6):
     _CLR = {"tile": "\033[96m", "mat": "\033[92m",
             "carpet": "\033[93m", "gravel": "\033[91m"}
     _RST = "\033[0m"
+    _frame = 0
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():
-            mujoco.mj_step(model, data)
-            label = ctrl.step()
+            # Run sim_speed physics steps per rendered frame
+            for _ in range(sim_speed):
+                mujoco.mj_step(model, data)
+                label = ctrl.step()
 
-            # Loop: teleport rover back to start when it reaches the far end
-            if data.qpos[0] > HF_SIZE_X - 0.3:
-                data.qpos[0]   = start_x
-                data.qpos[1]   = 0.0
-                data.qpos[2]   = 0.16
-                data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]  # identity quaternion
-                data.qvel[0:6] = 0.0                     # zero body velocity
-                mujoco.mj_forward(model, data)           # recompute contacts
+                # Loop: teleport rover back to start when it reaches the far end
+                if data.qpos[0] > HF_SIZE_X - 0.3:
+                    data.qpos[0]   = start_x
+                    data.qpos[1]   = 0.0
+                    data.qpos[2]   = 0.16
+                    data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]  # identity quaternion
+                    data.qvel[0:6] = 0.0                     # zero body velocity
+                    mujoco.mj_forward(model, data)           # recompute contacts
 
-            print(
-                f"\rt={data.time:7.2f}s | "
-                f"RMS={ctrl._smooth_rms:.3f} | "
-                f"terrain->{_CLR.get(label,'')}{label:7s}{_RST} | "
-                f"speed={ctrl.speed:.2f} m/s",
-                end="", flush=True,
-            )
+            # Throttle terminal print (every 25 frames) to avoid spam at high speed
+            _frame += 1
+            if _frame % 25 == 0:
+                print(
+                    f"\rt={data.time:7.2f}s | "
+                    f"RMS={ctrl._smooth_rms:.3f} | "
+                    f"terrain->{_CLR.get(label,'')}{label:7s}{_RST} | "
+                    f"speed={ctrl.speed:.2f} m/s",
+                    end="", flush=True,
+                )
             viewer.sync()
 
 
@@ -459,14 +467,19 @@ if __name__ == "__main__":
                      help="Number of terrain segments in the adaptive track. Default: 6.")
     ap.add_argument("--seed", type=int, default=None,
                      help="Random seed for segment order (omit for a different track each run).")
+    ap.add_argument("--sim-speed", type=int, default=1, metavar="N",
+                     help="Physics steps per render frame (default 1 = real-time). "
+                          "Use 4-10 to run faster than real-time.")
     ap.add_argument("--duration", type=float, default=6.0,
                      help="Seconds of driving per (terrain, pwm) run (dataset mode only).")
     ap.add_argument("--out", default="dataset.csv")
     args = ap.parse_args()
 
     if args.view_adaptive:
-        view_mixed_terrain(seed=args.seed, n_segments=args.segments)
+        view_mixed_terrain(seed=args.seed, n_segments=args.segments,
+                           sim_speed=args.sim_speed)
     elif args.view:
-        view_terrain(args.view, pwm=args.pwm, speed_ms=args.speed)
+        view_terrain(args.view, pwm=args.pwm, speed_ms=args.speed,
+                     sim_speed=args.sim_speed)
     else:
         build_dataset(duration_s=args.duration, out_csv=args.out)
