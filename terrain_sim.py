@@ -239,16 +239,20 @@ def build_model(terrain_key, start_x):
 def build_mixed_terrain_model(segment_order, start_x=-HF_SIZE_X + 0.4):
     """Build a MuJoCo model with N separately colored hfield geoms, one per terrain
     segment, placed end-to-end along the X axis. Each segment uses its terrain's
-    TERRAIN_COLOR so the surface is visually color-coded in the viewer."""
-    n_seg = len(segment_order)
-    blend_w = 3          # blend columns at each boundary
-    seg_hx = HF_SIZE_X / n_seg   # X half-extent of each segment (metres)
+    TERRAIN_COLOR so the surface is visually color-coded in the viewer.
 
-    seg_assets = ""
-    seg_geoms  = ""
-    seg_data   = []   # list of (hf_normalised, ncol) per segment
+    All segments share max_elev as their elevation scale so boundary heights are
+    physically compatible — the rover won't get trapped at segment transitions.
+    """
+    n_seg    = len(segment_order)
+    blend_w  = 3
+    seg_hx   = HF_SIZE_X / n_seg
+    max_elev = max(TERRAIN_PARAMS[k]["elev_m"] for k in segment_order)
 
-    prev_right_col = None
+    seg_assets     = ""
+    seg_geoms      = ""
+    seg_data       = []
+    prev_right_col = None  # last column of previous segment, in metres
 
     for i, key in enumerate(segment_order):
         p    = TERRAIN_PARAMS[key]
@@ -256,30 +260,29 @@ def build_mixed_terrain_model(segment_order, start_x=-HF_SIZE_X + 0.4):
         col_end   = ((i + 1) * (HF_NCOL // n_seg)) if i < n_seg - 1 else HF_NCOL
         ncol = col_end - col_start
 
+        # Noise in [0,1] scaled to this terrain's actual height in metres
         hf = band_limited_heightfield(HF_NROW, ncol, p["center_freq"],
                                       p["bandwidth"], p["seed"] + i * 31)
-        hf = hf * p["elev_m"]   # scale to real elevation (metres)
+        hf = hf * p["elev_m"]
 
-        # Short cosine blend on the left edge so seams are smooth
+        # Blend in metre space — heights across seams are physically continuous
         if prev_right_col is not None:
             for b in range(min(blend_w, ncol)):
-                alpha = (b + 1) / (blend_w + 1)
+                alpha    = (b + 1) / (blend_w + 1)
                 hf[:, b] = (1 - alpha) * prev_right_col + alpha * hf[:, b]
         prev_right_col = hf[:, -1].copy()
 
-        # Normalise to [0, 1] for MuJoCo hfield_data
-        hf_norm = hf - hf.min()
-        hf_norm /= (hf_norm.max() + 1e-9)
+        # Normalise relative to shared max_elev (MuJoCo multiplies data by max_elev)
+        hf_norm = np.clip(hf / max_elev, 0.0, 1.0)
         seg_data.append((hf_norm, ncol))
 
-        # Build per-segment MJCF snippets
         c    = TERRAIN_COLORS[key]
         rgba = f"{c[0]} {c[1]} {c[2]} {c[3]}"
-        cx   = -HF_SIZE_X + seg_hx * (2 * i + 1)   # segment centre X
+        cx   = -HF_SIZE_X + seg_hx * (2 * i + 1)
 
         seg_assets += (
             f'    <hfield name="hf_{i}" nrow="{HF_NROW}" ncol="{ncol}"'
-            f' size="{seg_hx:.4f} {HF_SIZE_Y} {p["elev_m"]} 0.02"/>\n'
+            f' size="{seg_hx:.4f} {HF_SIZE_Y} {max_elev} 0.02"/>\n'
             f'    <material name="mat_seg_{i}" rgba="{rgba}"/>\n'
         )
         seg_geoms += (
@@ -294,7 +297,6 @@ def build_mixed_terrain_model(segment_order, start_x=-HF_SIZE_X + 0.4):
     )
     model = mujoco.MjModel.from_xml_string(xml)
 
-    # Write each segment's normalised heightfield into the correct hfield_data offset
     for i, (hf_norm, ncol) in enumerate(seg_data):
         hf_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_HFIELD, f"hf_{i}")
         adr   = model.hfield_adr[hf_id]
