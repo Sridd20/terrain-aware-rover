@@ -476,10 +476,12 @@ class AdaptiveController:
         speed, kv = ADAPTIVE_POLICY[label]
         omega = speed / WHEEL_RADIUS
         self.data.ctrl[:] = [omega, omega, omega, omega]
-        # Soften motor gain on rough terrain to prevent QACC blow-up
+        # Soften motor gain on rough terrain to prevent QACC blow-up.
+        # For MuJoCo velocity actuators, gain is gainprm[0] and velocity damping is biasprm[2].
         for i in range(self.model.nu):
             self.model.actuator_gainprm[i, 0] = kv
-            self.model.actuator_biasprm[i, 1] = -kv   # velocity actuator bias
+            self.model.actuator_biasprm[i, 1] = 0.0   # clear accidental position spring
+            self.model.actuator_biasprm[i, 2] = -kv   # correct velocity damping coefficient
 
 
 def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1):
