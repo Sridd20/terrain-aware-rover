@@ -484,7 +484,51 @@ class AdaptiveController:
             self.model.actuator_biasprm[i, 2] = -kv   # correct velocity damping coefficient
 
 
-def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1):
+class ManualController:
+    """Manual WASD controller for the rover."""
+    def __init__(self, model, data):
+        self.model = model
+        self.data = data
+        self.speed = 0.0
+        self.turn = 0.0
+        self.kv = 0.05
+        for i in range(self.model.nu):
+            self.model.actuator_gainprm[i, 0] = self.kv
+            self.model.actuator_biasprm[i, 1] = 0.0
+            self.model.actuator_biasprm[i, 2] = -self.kv
+
+    def on_key(self, keycode):
+        if keycode == 87:    # W
+            self.speed = 0.4
+            self.turn = 0.0
+        elif keycode == 83:  # S
+            if self.speed > 0:
+                self.speed = 0.0
+            else:
+                self.speed = -0.4
+            self.turn = 0.0
+        elif keycode == 65:  # A
+            self.turn = 0.4
+            self.speed = 0.0
+        elif keycode == 68:  # D
+            self.turn = -0.4
+            self.speed = 0.0
+        elif keycode == 32:  # Space
+            self.speed = 0.0
+            self.turn = 0.0
+
+    def step(self):
+        omega_l = (self.speed - self.turn) / WHEEL_RADIUS
+        omega_r = (self.speed + self.turn) / WHEEL_RADIUS
+        self.data.ctrl[:] = [omega_l, omega_l, omega_r, omega_r]
+        if self.speed > 0: return "fwd"
+        elif self.speed < 0: return "rev"
+        elif self.turn > 0: return "left"
+        elif self.turn < 0: return "right"
+        return "stop"
+
+
+def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1, manual=False):
     """Launch the MuJoCo viewer with a randomly ordered mixed-terrain track.
     The rover loops continuously; the adaptive controller adjusts speed/torque
     in real-time from IMU vibration alone.
@@ -496,12 +540,17 @@ def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1):
     segment_order = rng.choice(terrain_keys, size=n_segments, replace=True).tolist()
 
     print(f"\nTrack ({n_segments} segments): {' -> '.join(segment_order)}")
-    print(f"Controller: BLIND (IMU only)  |  Looping: yes  |  Speed: {sim_speed}x\n")
 
     start_x = -HF_SIZE_X + 0.4
     model = build_mixed_terrain_model(segment_order, start_x=start_x)
     data  = mujoco.MjData(model)
-    ctrl  = AdaptiveController(model, data)
+
+    if manual:
+        ctrl = ManualController(model, data)
+        print(f"Controller: MANUAL (WASD)  |  Looping: yes  |  Speed: {sim_speed}x\n")
+    else:
+        ctrl = AdaptiveController(model, data)
+        print(f"Controller: BLIND (IMU only)  |  Looping: yes  |  Speed: {sim_speed}x\n")
 
     # ANSI colours for terminal label display
     _CLR = {"tile": "\033[96m", "mat": "\033[92m",
@@ -509,7 +558,11 @@ def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1):
     _RST = "\033[0m"
     _frame = 0
 
-    with mujoco.viewer.launch_passive(model, data) as viewer:
+    kwargs = {}
+    if manual:
+        kwargs["key_callback"] = ctrl.on_key
+
+    with mujoco.viewer.launch_passive(model, data, **kwargs) as viewer:
         while viewer.is_running():
             # Run sim_speed physics steps per rendered frame
             for _ in range(sim_speed):
@@ -528,13 +581,21 @@ def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1):
             # Throttle terminal print (every 25 frames) to avoid spam at high speed
             _frame += 1
             if _frame % 25 == 0:
-                print(
-                    f"\rt={data.time:7.2f}s | "
-                    f"RMS={ctrl._smooth_rms:.3f} | "
-                    f"terrain->{_CLR.get(label,'')}{label:7s}{_RST} | "
-                    f"speed={ctrl.speed:.2f} m/s",
-                    end="", flush=True,
-                )
+                if manual:
+                    print(
+                        f"\rt={data.time:7.2f}s | "
+                        f"mode={label:7s} | "
+                        f"speed={ctrl.speed:.2f} m/s",
+                        end="", flush=True,
+                    )
+                else:
+                    print(
+                        f"\rt={data.time:7.2f}s | "
+                        f"RMS={ctrl._smooth_rms:.3f} | "
+                        f"terrain->{_CLR.get(label,'')}{label:7s}{_RST} | "
+                        f"speed={ctrl.speed:.2f} m/s",
+                        end="", flush=True,
+                    )
             viewer.sync()
 
 
@@ -551,8 +612,10 @@ if __name__ == "__main__":
                      help="Target wheel speed in m/s for --view mode (overrides --pwm).")
     ap.add_argument("--view-adaptive", action="store_true",
                      help="Launch mixed random-terrain track with blind adaptive control.")
+    ap.add_argument("--view-wasd", action="store_true",
+                     help="Launch mixed random-terrain track with manual WASD keyboard control.")
     ap.add_argument("--segments", type=int, default=6,
-                     help="Number of terrain segments in the adaptive track. Default: 6.")
+                     help="Number of terrain segments in the adaptive/wasd track. Default: 6.")
     ap.add_argument("--seed", type=int, default=None,
                      help="Random seed for segment order (omit for a different track each run).")
     ap.add_argument("--sim-speed", type=int, default=1, metavar="N",
@@ -565,7 +628,10 @@ if __name__ == "__main__":
 
     if args.view_adaptive:
         view_mixed_terrain(seed=args.seed, n_segments=args.segments,
-                           sim_speed=args.sim_speed)
+                           sim_speed=args.sim_speed, manual=False)
+    elif args.view_wasd:
+        view_mixed_terrain(seed=args.seed, n_segments=args.segments,
+                           sim_speed=args.sim_speed, manual=True)
     elif args.view:
         view_terrain(args.view, pwm=args.pwm, speed_ms=args.speed,
                      sim_speed=args.sim_speed)
