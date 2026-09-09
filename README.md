@@ -69,11 +69,17 @@ Pitch = `atan2(-ax, sqrt(ay² + az²))` from the IMU gravity vector.
 ## Repository Layout
 
 ```
-/firmware       ESP32 C++ — IMU sampling, feature extraction, classifier, motor control
-/ml             Python — training pipeline (collect → extract → train → export to C++)
-/dashboard      Flask/Streamlit — live label, confidence, PWM, slope state over MQTT
-/data           Labelled vibration sessions (raw + processed CSVs)
-/docs           Design doc, wiring diagrams, test results
+terrain_sim.py            MuJoCo physics sim — heightfield terrain + 4-wheel rover
+generate_ml_dataset.py    Generate richer ML training data from MuJoCo (ml_dataset.csv)
+plot_scatter.py           Scatter plot: Vibration RMS vs Speed (presentation figure)
+plot_dataset_summary.py   Dataset summary table (presentation figure)
+dataset.csv               Original 108-sample dataset (3 PWM levels × 4 terrains)
+ml_dataset.csv            Richer 340-sample dataset (5 PWM levels × 4 terrains, + speed column)
+/firmware                 ESP32 C++ — IMU sampling, feature extraction, classifier, motor control
+/ml                       Python — training pipeline (collect → extract → train → export to C++)
+/dashboard                Flask/Streamlit — live label, confidence, PWM, slope state over MQTT
+/data                     Labelled vibration sessions (raw + processed CSVs)
+/docs                     Design doc, wiring diagrams, test results
 ```
 
 ---
@@ -103,17 +109,67 @@ Open `http://localhost:5000` — shows live accel trace, terrain label, confiden
 
 ---
 
-## Synthetic Data Bootstrap (optional)
+## Synthetic Data Bootstrap
 
 If you don't have the hardware yet and want to test the ML pipeline end-to-end, `terrain_sim.py` can generate a labelled `dataset.csv` using MuJoCo physics:
 
 ```bash
 pip install mujoco
 python terrain_sim.py                        # generate dataset.csv
-python terrain_sim.py --view gravel --pwm 25 # interactive 3D viewer (--pwm ≤ 25 for stability)
+python terrain_sim.py --view gravel --pwm 25 # interactive 3D viewer
 ```
 
 > This is **not** a substitute for real data — bump amplitudes are estimates, not measurements. Use it to shake out bugs in the feature extraction → training pipeline before hardware is ready.
+
+---
+
+## ML Classifier Pipeline
+
+### Why the RMS threshold fails
+
+The original `AdaptiveController` classifies terrain using a single RMS threshold:
+
+```python
+RMS_THRESHOLDS = [(0.10, "tile"), (0.25, "mat"), (0.55, "carpet"), (inf, "gravel")]
+```
+
+This breaks at higher speeds: **tile driven fast** produces RMS values (0.6–1.6 m/s²) that overlap with gravel and carpet ranges. The root cause — vibration RMS is speed-dependent, so a single threshold per terrain can't separate all cases.
+
+### Solution: ML classifier using Speed + Vibration
+
+By adding **rover speed (m/s)** as a second feature alongside the 5 vibration features, an ML classifier cleanly separates all four terrain classes. Speed is always distinct per terrain because each class runs at a different target velocity from the adaptive policy.
+
+### Generating the ML dataset
+
+```bash
+python generate_ml_dataset.py    # writes ml_dataset.csv (340 windows)
+```
+
+`generate_ml_dataset.py` runs MuJoCo rollouts with **5 PWM levels per terrain** (vs 3 in the original) and **10 s rollouts** (vs 6 s), producing 85 windows per class:
+
+| Terrain | PWM levels | Speed range (m/s) | Windows |
+|---------|------------|-------------------|---------|
+| Tile    | 140–255    | 0.29 – 0.53       | 85      |
+| Mat     | 120–225    | 0.25 – 0.46       | 85      |
+| Carpet  | 100–205    | 0.21 – 0.42       | 85      |
+| Gravel  | 80–165     | 0.16 – 0.34       | 85      |
+
+The CSV schema adds a `speed` column:
+```
+std, peak, rms, p2p, zcr, speed, label
+```
+
+### Generating presentation figures
+
+```bash
+# Scatter plot: Vibration RMS vs Speed (shows why RMS alone fails)
+python plot_scatter.py              # -> scatter_speed_vib.png
+
+# Dataset summary table
+python plot_dataset_summary.py      # -> dataset_summary_table.png
+```
+
+Both scripts use the `Agg` matplotlib backend (headless — no display required).
 
 ---
 
