@@ -82,6 +82,14 @@ RMS_THRESHOLDS = [
     (float("inf"), "gravel"),
 ]
 
+# Chassis RGBA colours per terrain label (shown live in the MuJoCo viewer)
+TERRAIN_COLORS = {
+    "tile":   [0.15, 0.75, 1.00, 1.0],   # cyan-blue  — fast, smooth
+    "mat":    [0.20, 0.80, 0.30, 1.0],   # green      — moderate
+    "carpet": [1.00, 0.70, 0.10, 1.0],   # amber      — cautious
+    "gravel": [0.90, 0.20, 0.20, 1.0],   # red        — slow, rough
+}
+
 
 def band_limited_heightfield(nrow, ncol, center_freq, bandwidth, seed):
     """White noise, band-passed in the 2D spatial-frequency domain, normalized to [0,1]."""
@@ -312,6 +320,9 @@ def view_terrain(terrain_key, pwm=80, speed_ms=None, sim_speed=1):
     else:
         omega = pwm * PWM_TO_OMEGA
     data.ctrl[:] = [omega, omega, omega, omega]
+    # Set chassis to the terrain's colour (static, since terrain is fixed)
+    chassis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "chassis_geom")
+    model.geom_rgba[chassis_id] = TERRAIN_COLORS[terrain_key]
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():
             for _ in range(sim_speed):   # multiple steps per render frame
@@ -420,6 +431,9 @@ def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1):
             "carpet": "\033[93m", "gravel": "\033[91m"}
     _RST = "\033[0m"
     _frame = 0
+    # Resolve chassis geom index once for live colour updates
+    _chassis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "chassis_geom")
+    _prev_label = None
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():
@@ -439,6 +453,10 @@ def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1):
 
             # Throttle terminal print (every 25 frames) to avoid spam at high speed
             _frame += 1
+            # Update chassis colour whenever the terrain label changes
+            if label != _prev_label:
+                model.geom_rgba[_chassis_id] = TERRAIN_COLORS[label]
+                _prev_label = label
             if _frame % 25 == 0:
                 print(
                     f"\rt={data.time:7.2f}s | "
