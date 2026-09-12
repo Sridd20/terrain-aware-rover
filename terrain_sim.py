@@ -74,11 +74,13 @@ ADAPTIVE_POLICY = {
     "gravel": (0.18, 0.04),
 }
 
-# Rolling RMS thresholds (gravity-bias-removed Z accel, m/s²) for blind classification
+# Rolling RMS thresholds (gravity-bias-removed Z accel, m/s²) for blind classification.
+# Boundaries are midpoints between adjacent class means from dataset_summary.csv,
+# sorted by ascending vibration intensity: carpet(0.255) < mat(0.291) < tile(0.416) < gravel(0.477).
 RMS_THRESHOLDS = [
-    (0.10, "tile"),
-    (0.25, "mat"),
-    (0.55, "carpet"),
+    (0.273, "carpet"),   # midpoint(carpet=0.255, mat=0.291)
+    (0.354, "mat"),      # midpoint(mat=0.291,  tile=0.416)
+    (0.447, "tile"),     # midpoint(tile=0.416, gravel=0.477)
     (float("inf"), "gravel"),
 ]
 
@@ -408,12 +410,18 @@ def view_terrain(terrain_key, pwm=80, speed_ms=None, sim_speed=1):
 # ----------------------------------------------------------------------
 # 7. Blind adaptive controller (reads only IMU, knows nothing about terrain)
 # ----------------------------------------------------------------------
+# Number of physics steps between IMU samples: matches dataset SR=100 Hz
+# PHYSICS_DT=0.002 s  ->  1/SR/PHYSICS_DT = 1/100/0.002 = 5 steps per sample
+_IMU_SAMPLE_EVERY = int(round(1.0 / SR / PHYSICS_DT))   # = 5
+
+
 class AdaptiveController:
     """
     Closed-loop terrain-adaptive speed and torque controller.
 
     Every `control_every` physics steps it:
       1. Computes a rolling RMS of the gravity-bias-removed Z accelerometer signal
+         sampled at SR=100 Hz (matching the dataset pipeline exactly)
       2. Low-pass smooths to suppress transition spikes
       3. Classifies terrain from RMS alone (tile / mat / carpet / gravel)
       4. Applies the matching speed + motor-gain from ADAPTIVE_POLICY
@@ -421,34 +429,52 @@ class AdaptiveController:
     The controller is entirely blind — it never receives the terrain label.
     """
 
-    def __init__(self, model, data, window=50, alpha=0.20, control_every=25,
+    def __init__(self, model, data, window=100, alpha=0.20, control_every=50,
                  settle_steps=250):
         self.data = data
         self.model = model
         self.window = window
-        self.alpha = alpha           # low-pass smoothing factor
+        self.alpha = alpha           # low-pass smoothing factor for smooth_rms
         self.control_every = control_every
         self.settle_steps = settle_steps  # physics steps before control activates (~0.5 s)
-        self._buf = deque(maxlen=window)
+        self._buf = deque(maxlen=window)  # 100 samples @ 100 Hz = 1 s of data
         self._smooth_rms = 0.0
         self._step_count = 0
+        # Long-term EMA bias: tracks the DC gravity component in local-Z accel.
+        # alpha_bias=0.005 -> time constant ~200 samples @ 100 Hz = ~2 s, so it
+        # ignores transient spikes and slowly-changing tilt, unlike local median.
+        self._bias = 0.0
+        self._bias_alpha = 0.005
+        self._bias_initialised = False
         self.label = "tile"          # current terrain estimate
         self.speed = ADAPTIVE_POLICY["tile"][0]
         self._apply("tile")          # safe starting defaults
 
     def step(self):
-        """Call once per physics step. Records IMU, ticks control. Returns label."""
-        self._buf.append(float(self.data.sensordata[2]))  # Z-axis accel
+        """Call once per physics step. Records IMU at 100 Hz, ticks control. Returns label."""
         self._step_count += 1
+
+        # Subsample IMU at 100 Hz (every _IMU_SAMPLE_EVERY physics steps) to
+        # match the dataset pipeline: avoids 500 Hz noise inflating the RMS.
+        if self._step_count % _IMU_SAMPLE_EVERY == 0:
+            z = float(self.data.sensordata[2])  # Z-axis accel, local frame
+            # Seed the EMA bias on first sample to avoid a huge initial error.
+            if not self._bias_initialised:
+                self._bias = z
+                self._bias_initialised = True
+            else:
+                self._bias = (1.0 - self._bias_alpha) * self._bias + self._bias_alpha * z
+            self._buf.append(z)
 
         # Settle period: rover lands on terrain; don't classify yet to avoid spike
         if self._step_count < self.settle_steps:
             return self.label
 
-        # Immediately after settle: seed smooth_rms from a clean buffer
+        # Immediately after settle: reset buffer and bias so landing spike is gone
         if self._step_count == self.settle_steps:
-            self._buf.clear()        # flush spike data
-            self._smooth_rms = 0.0  # will re-bootstrap over next control ticks
+            self._buf.clear()
+            self._smooth_rms = 0.0
+            self._bias_initialised = False   # will re-seed from next sample
             return self.label
 
         if self._step_count % self.control_every == 0:
@@ -460,10 +486,13 @@ class AdaptiveController:
         return self.label
 
     def _rms(self):
-        if len(self._buf) < 5:
+        if len(self._buf) < 10:
             return 0.0
         arr = np.array(self._buf, dtype=np.float64)
-        arr -= np.median(arr)        # remove gravity bias
+        # Use the long-term EMA bias instead of the local-window median.
+        # The local median is corrupted by spikes and by gravity projection when
+        # the chassis pitches over segment boundaries; the EMA is not.
+        arr -= self._bias
         return float(np.sqrt((arr ** 2).mean()))
 
     def _classify(self, rms):
@@ -528,12 +557,14 @@ class ManualController:
         return "stop"
 
 
-def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1, manual=False):
+def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1, manual=False, slowdown=1.0):
     """Launch the MuJoCo viewer with a randomly ordered mixed-terrain track.
     The rover loops continuously; the adaptive controller adjusts speed/torque
     in real-time from IMU vibration alone.
-    sim_speed: number of physics steps per render frame (>1 = faster than real-time)."""
+    sim_speed: number of physics steps per render frame (>1 = faster than real-time).
+    slowdown:  wall-clock multiplier (>1 = slower; e.g. 2.0 = half real-time speed)."""
     import mujoco.viewer
+    import time
 
     rng = np.random.default_rng(seed)
     terrain_keys = list(TERRAIN_PARAMS.keys())
@@ -577,26 +608,40 @@ def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1, manual=False):
                     data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]  # identity quaternion
                     data.qvel[0:6] = 0.0                     # zero body velocity
                     mujoco.mj_forward(model, data)           # recompute contacts
+                    ctrl._buf.clear()                         # flush teleport spike
+                    ctrl._bias_initialised = False            # re-seed bias after landing
 
             # Throttle terminal print (every 25 frames) to avoid spam at high speed
             _frame += 1
             if _frame % 25 == 0:
+                # Ground-truth terrain from rover x-position (which segment it's on)
+                _seg_w = 2 * HF_SIZE_X / n_segments
+                _seg_i = int((data.qpos[0] + HF_SIZE_X) / _seg_w)
+                _seg_i = max(0, min(_seg_i, n_segments - 1))
+                true_terrain = segment_order[_seg_i]
+                # Actual forward speed from the freejoint linear velocity (m/s)
+                actual_speed = abs(float(data.qvel[0]))
+
                 if manual:
                     print(
                         f"\rt={data.time:7.2f}s | "
-                        f"mode={label:7s} | "
-                        f"speed={ctrl.speed:.2f} m/s",
+                        f"terrain={_CLR.get(true_terrain,'')}{true_terrain:7s}{_RST} | "
+                        f"speed={actual_speed:.2f} m/s  (mode={label})",
                         end="", flush=True,
                     )
                 else:
                     print(
                         f"\rt={data.time:7.2f}s | "
+                        f"terrain={_CLR.get(true_terrain,'')}{true_terrain:7s}{_RST} "
+                        f"pred={ctrl.label:7s} | "
                         f"RMS={ctrl._smooth_rms:.3f} | "
-                        f"terrain->{_CLR.get(label,'')}{label:7s}{_RST} | "
-                        f"speed={ctrl.speed:.2f} m/s",
+                        f"speed={actual_speed:.2f} m/s (target={ctrl.speed:.2f})",
                         end="", flush=True,
                     )
             viewer.sync()
+            # Slow down below real-time if requested (sleep extra wall-clock time)
+            if slowdown > 1.0:
+                time.sleep(PHYSICS_DT * sim_speed * (slowdown - 1.0))
 
 
 if __name__ == "__main__":
@@ -621,6 +666,9 @@ if __name__ == "__main__":
     ap.add_argument("--sim-speed", type=int, default=1, metavar="N",
                      help="Physics steps per render frame (default 1 = real-time). "
                           "Use 4-10 to run faster than real-time.")
+    ap.add_argument("--slowdown", type=float, default=1.0, metavar="X",
+                     help="Wall-clock slowdown multiplier (default 1.0 = real-time). "
+                          "Use e.g. 2.0 for half speed, 4.0 for quarter speed.")
     ap.add_argument("--duration", type=float, default=6.0,
                      help="Seconds of driving per (terrain, pwm) run (dataset mode only).")
     ap.add_argument("--out", default="dataset.csv")
@@ -628,10 +676,10 @@ if __name__ == "__main__":
 
     if args.view_adaptive:
         view_mixed_terrain(seed=args.seed, n_segments=args.segments,
-                           sim_speed=args.sim_speed, manual=False)
+                           sim_speed=args.sim_speed, manual=False, slowdown=args.slowdown)
     elif args.view_wasd:
         view_mixed_terrain(seed=args.seed, n_segments=args.segments,
-                           sim_speed=args.sim_speed, manual=True)
+                           sim_speed=args.sim_speed, manual=True, slowdown=args.slowdown)
     elif args.view:
         view_terrain(args.view, pwm=args.pwm, speed_ms=args.speed,
                      sim_speed=args.sim_speed)
