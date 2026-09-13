@@ -74,6 +74,24 @@ ADAPTIVE_POLICY = {
     "gravel": (0.18, 0.04),
 }
 
+# Transition-pair ramp profiles for all 12 ordered (from, to) pairs.
+# ramp_rate: m/s per control tick (0.1 s window) — how fast speed changes.
+# hold:      consecutive matching windows required before committing the new label.
+TRANSITION_RAMP = {
+    ("tile",   "gravel"): dict(ramp_rate=0.04, hold=4),  # sudden rough — brake hard
+    ("tile",   "carpet"): dict(ramp_rate=0.08, hold=3),  # moderate softening
+    ("tile",   "mat"):    dict(ramp_rate=0.10, hold=2),  # subtle — quick ramp
+    ("mat",    "gravel"): dict(ramp_rate=0.05, hold=4),  # rough incoming — brake firmly
+    ("mat",    "carpet"): dict(ramp_rate=0.09, hold=2),  # near-similar — gentle
+    ("mat",    "tile"):   dict(ramp_rate=0.12, hold=2),  # smoother — ease up
+    ("carpet", "gravel"): dict(ramp_rate=0.05, hold=4),  # big jump in roughness
+    ("carpet", "mat"):    dict(ramp_rate=0.10, hold=2),  # slight improvement
+    ("carpet", "tile"):   dict(ramp_rate=0.14, hold=1),  # much smoother — accelerate freely
+    ("gravel", "carpet"): dict(ramp_rate=0.08, hold=3),  # some improvement — ramp up gently
+    ("gravel", "mat"):    dict(ramp_rate=0.10, hold=2),  # clear improvement
+    ("gravel", "tile"):   dict(ramp_rate=0.15, hold=1),  # suddenly smooth — quick ramp
+}
+
 # Rolling RMS thresholds (gravity-bias-removed Z accel, m/s²) for blind classification.
 # Boundaries are midpoints between adjacent class means from dataset_summary.csv,
 # sorted by ascending vibration intensity: carpet(0.255) < mat(0.291) < tile(0.416) < gravel(0.477).
@@ -446,8 +464,15 @@ class AdaptiveController:
         self._bias = 0.0
         self._bias_alpha = 0.005
         self._bias_initialised = False
-        self.label = "tile"          # current terrain estimate
+        self.label = "tile"          # current terrain estimate (committed)
         self.speed = ADAPTIVE_POLICY["tile"][0]
+        # --- Transition-pair ramp state ---
+        self._prev_label  = "tile"   # label before the pending transition
+        self._cand_label  = None     # candidate new label being held for confirmation
+        self._hold_count  = 0        # consecutive windows confirming the candidate
+        self._ramp_target = None     # target speed during ramp (m/s)
+        self._ramp_rate   = 0.0      # m/s per control tick
+        self._in_ramp     = False    # True while smoothly interpolating speed
         self._apply("tile")          # safe starting defaults
 
     def step(self):
@@ -480,9 +505,13 @@ class AdaptiveController:
         if self._step_count % self.control_every == 0:
             rms = self._rms()
             self._smooth_rms = self.alpha * rms + (1.0 - self.alpha) * self._smooth_rms
-            self.label = self._classify(self._smooth_rms)
-            self.speed = ADAPTIVE_POLICY[self.label][0]
-            self._apply(self.label)
+            new_label = self._classify(self._smooth_rms)
+            self._check_transition(new_label)
+
+        # Tick the active ramp every control_every steps (same cadence as classify)
+        if self._step_count % self.control_every == 0:
+            self._tick_ramp()
+
         return self.label
 
     def _rms(self):
@@ -501,8 +530,71 @@ class AdaptiveController:
                 return label
         return "gravel"
 
+    def _check_transition(self, new_label):
+        """Hold-counter + ramp-start logic.
+
+        Same label as committed: reset candidate and hold counter.
+        Different label: accumulate hold_count; only commit when the candidate
+        has been confirmed for the required number of consecutive windows
+        (prevents false transitions at seam noise).
+        """
+        if new_label == self.label:
+            # Stable — reset any pending candidate
+            self._cand_label = None
+            self._hold_count = 0
+            return
+
+        if new_label != self._cand_label:
+            # New candidate — start fresh hold counter
+            self._cand_label = new_label
+            self._hold_count = 1
+        else:
+            self._hold_count += 1
+
+        # Look up required hold windows for this pair
+        profile = TRANSITION_RAMP.get((self.label, new_label),
+                                      dict(ramp_rate=0.10, hold=2))
+        if self._hold_count >= profile["hold"]:
+            # Commit the transition and start ramping
+            self._prev_label  = self.label
+            self.label        = new_label
+            self._cand_label  = None
+            self._hold_count  = 0
+            self._ramp_target = ADAPTIVE_POLICY[new_label][0]
+            self._ramp_rate   = profile["ramp_rate"]
+            self._in_ramp     = True
+            # Apply new motor gain immediately (roughness-dependent stiffness)
+            _, kv = ADAPTIVE_POLICY[new_label]
+            for i in range(self.model.nu):
+                self.model.actuator_gainprm[i, 0] = kv
+                self.model.actuator_biasprm[i, 1] = 0.0
+                self.model.actuator_biasprm[i, 2] = -kv
+            print(f"  [transition] {self._prev_label} -> {new_label}  "
+                  f"rate={self._ramp_rate:.2f} m/s/tick  "
+                  f"target={self._ramp_target:.2f} m/s")
+
+    def _tick_ramp(self):
+        """Interpolate speed toward ramp_target at ramp_rate per control tick.
+        Called every control window. No-op when no ramp is active."""
+        if not self._in_ramp:
+            return
+        diff = self._ramp_target - self.speed
+        if abs(diff) < 1e-3:
+            self.speed    = self._ramp_target
+            self._in_ramp = False
+        else:
+            step       = min(abs(diff), self._ramp_rate) * np.sign(diff)
+            self.speed += step
+        omega = self.speed / WHEEL_RADIUS
+        self.data.ctrl[:] = [omega, omega, omega, omega]
+        print(f"  [ramp]  speed={self.speed:.3f} m/s  "
+              f"target={self._ramp_target:.3f}  "
+              f"diff={self._ramp_target - self.speed:.3f}",
+              end="\r")
+
     def _apply(self, label):
         speed, kv = ADAPTIVE_POLICY[label]
+        self.speed = speed
         omega = speed / WHEEL_RADIUS
         self.data.ctrl[:] = [omega, omega, omega, omega]
         # Soften motor gain on rough terrain to prevent QACC blow-up.
@@ -610,6 +702,11 @@ def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1, manual=False, slowd
                     mujoco.mj_forward(model, data)           # recompute contacts
                     ctrl._buf.clear()                         # flush teleport spike
                     ctrl._bias_initialised = False            # re-seed bias after landing
+                    # Clear ramp state — rover is back on tile at start
+                    ctrl._in_ramp     = False
+                    ctrl._cand_label  = None
+                    ctrl._hold_count  = 0
+                    ctrl._prev_label  = ctrl.label
 
             # Throttle terminal print (every 25 frames) to avoid spam at high speed
             _frame += 1
