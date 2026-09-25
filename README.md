@@ -1,15 +1,15 @@
 # Terrain-Aware Autonomous Rover
 
-An ESP32-based rover that classifies the surface it's driving on — **tile, mat, carpet, or gravel** — in real time using IMU vibration, and automatically adjusts its speed and torque profile to prevent slipping and maintain traction.
+An ESP32-based rover that classifies the surface it's driving on — **tile, mat, carpet, or gravel** — in real time using IMU vibration, and automatically adjusts its speed and torque profile to maintain traction.
 
 ```
 MPU6050 (100 Hz IMU)
-    → 1s windowed accel signal (z-axis)
-    → 5-D feature vector: std, rms, peak, p2p, zcr
-    → on-device decision tree classifier
-    → terrain label (tile / mat / carpet / gravel)
-    → adaptive driving profile (PWM + accel ramp + turn gain)
-    → L298N motor driver → DC motors
+    → 1s windowed accel signal (z-axis, gravity-removed)
+    → 5-D feature vector: std, rms, p2p, zcr, speed
+    → on-device decision tree classifier  (terrain_classifier.h)
+    → terrain label: tile / mat / carpet / gravel
+    → adaptive PWM + transition ramp control
+    → L298N dual H-bridge → 2× DC motors
 ```
 
 ---
@@ -19,9 +19,9 @@ MPU6050 (100 Hz IMU)
 Different surfaces have very different traction properties. A rover running at full speed on gravel will lose traction and slip; the same speed on tile is fine. By detecting the surface from vibration signature alone (no camera, no extra sensors), the rover can:
 
 - **Reduce PWM** on low-grip surfaces like gravel before a slip happens
-- **Slow acceleration ramps** so wheels don't spin up faster than grip allows
+- **Smooth speed transitions** with per-pair ramp rates (e.g., gravel→tile ramps up faster than tile→gravel brakes)
 - **Reduce turn gain** on loose surfaces to keep straight-line traction
-- **React to slopes** — if pitch exceeds a threshold, override to a climb/retreat mode regardless of terrain
+- **Confirm terrain changes** over multiple windows before committing (prevents flickering at seams)
 
 ---
 
@@ -29,239 +29,240 @@ Different surfaces have very different traction properties. A rover running at f
 
 | Component | Part | Notes |
 |-----------|------|-------|
-| MCU | ESP32 DevKit V1 | Runs classifier + control loop |
-| IMU | MPU6050 | I2C, GPIO 21/22; bolt rigidly near a wheel mount |
-| Motor driver | L298N | Single driver per side (skid-steer) |
-| Motors | 2× DC with encoder (optional) | Left/right coupled |
-| Power | Separate battery for motors | Do not power motors from ESP32 5V pin |
+| MCU | ESP32 DevKit V1 (30-pin) | WiFi AP + WebSocket + OLED + motor control |
+| IMU | MPU6050 | I²C addr 0x68, GPIO 21 (SDA) / 22 (SCL) |
+| Motor driver | L298N dual H-bridge | ENA/ENB jumpers **must be removed** for PWM speed control |
+| Motors | 2× yellow TT DC motors | Rear-left (ch A) + Rear-right (ch B); front caster is passive |
+| Display | SSD1306 0.96″ OLED (128×64) | I²C addr 0x3C, shared SDA/SCL bus with MPU6050 |
+| Power | 3S 18650 Li-ion (11.1 V) + 3S BMS | Motor supply; L298N 5 V reg powers ESP32 via VIN |
 
 > **Mounting critical:** bolt the MPU6050 directly to the chassis frame, near a wheel mount — not on foam or a loose breadboard. Soft mounting low-pass-filters the vibration signal and kills classification accuracy.
 
+### Pin Map
+
+| Signal | ESP32 GPIO |
+|--------|-----------|
+| L298N IN1 (Left dir A) | 27 |
+| L298N IN2 (Left dir B) | 26 |
+| L298N IN3 (Right dir A) | 25 |
+| L298N IN4 (Right dir B) | 33 |
+| L298N ENA (Left PWM) | 14 |
+| L298N ENB (Right PWM) | 12 |
+| MPU6050 / OLED SDA | 21 |
+| MPU6050 / OLED SCL | 22 |
+
 ---
 
-## Driving Profiles (per terrain)
+## Operating Modes
 
-| Terrain | PWM (0–255) | Accel ramp | Turn gain | Why |
-|---------|------------|------------|-----------|-----|
-| Tile | 220 | 0.2 s | 1.0 | Hard, high grip — full speed safe |
-| Mat | 190 | 0.3 s | 0.9 | Slightly deformable — mild caution |
-| Carpet | 170 | 0.4 s | 0.8 | Fibres grab unpredictably — slower ramp |
-| Gravel | 130 | 0.6 s | 0.6 | Loose, low grip — slowest, gentlest ramp |
+The firmware runs in one of two modes, switchable at any time from the WiFi dashboard or Serial:
 
-These are tuned to prevent slip at the nominal speed for each surface. Tune further once you have real hardware runs.
+### Training Mode
+- You select the current terrain label (Tile / Mat / Carpet / Gravel) via the dashboard or `LABEL <name>` Serial command
+- Every 1-second feature window is tagged with your label and logged to Serial CSV
+- Use this to collect `hw_dataset.csv` for re-training on real hardware
+
+### Testing Mode
+- The on-board decision tree classifier (`terrain_classifier.h`) predicts the terrain every 1-second window
+- OLED and dashboard show **Predicted** terrain + confidence
+- You confirm (✓) or correct (✗) via the dashboard — feedback rows are logged for future retraining
 
 ---
 
-## Slope Handling (overrides terrain profile)
+## WiFi Dashboard
 
-| State | Entry | Action |
-|-------|-------|--------|
-| NORMAL | default | Apply terrain profile |
-| DETECT | pitch > 6° | Hold heading, sample pitch |
-| CLIMB | pitch 6–12° | Elevated PWM, minimal turning |
-| RETREAT | pitch ≥ 12° | Reverse ~15–20 cm |
-| APPROACH | after retreat | Max PWM, locked heading, then re-attempt |
+The ESP32 creates a WiFi Access Point — no router needed.
 
-Pitch = `atan2(-ax, sqrt(ay² + az²))` from the IMU gravity vector.
+| Setting | Value |
+|---------|-------|
+| SSID | `TerrainRover` |
+| Password | `rover1234` |
+| Dashboard URL | `http://192.168.4.1` |
+
+Open the URL from any phone or PC browser. The dashboard provides:
+
+- **Mode toggle** — Training / Testing
+- **Terrain selector** (Training mode) — large buttons for Tile / Mat / Carpet / Gravel
+- **Classification result** (Testing mode) — Predicted vs Actual with ✓/✗ match indicator and confidence bar
+- **Motor controls** — PWM slider (0–255), GO / STOP buttons
+- **Live vibration gauges** — std, rms, p2p, zcr, speed updated every second via WebSocket
+- **Data logging** — REC / STOP, sample counter, Download CSV button
+
+---
+
+## OLED Display
+
+The 128×64 OLED mounted on the rover shows at a glance:
+
+```
+┌────────────────────────────────┐
+│ TERRAIN-AWARE ROVER    00:02:34│  ← uptime
+├────────────────────────────────┤
+│ Mode: TRAINING                 │  ← current mode
+│ Actual:    TILE                │  ← your selected label
+│ Predicted: TILE  ✓             │  ← classifier + match icon
+├────────────────────────────────┤
+│ RMS: 0.141   ZCR: 57          │
+│ STD: 0.142   P2P: 1.37        │
+├────────────────────────────────┤
+│ PWM:180  0.29m/s  WiFi:1  REC●│  ← motor, speed, clients, rec
+└────────────────────────────────┘
+```
+
+When **predicted ≠ actual**, the predicted label inverts (white on black) so mismatches are obvious while the rover is in motion.
+
+---
+
+## Adaptive Driving Profiles
+
+| Terrain | Target speed | Motor gain (kv) | Ramp to tile | Ramp to gravel |
+|---------|-------------|-----------------|-------------|----------------|
+| Tile    | 0.55 m/s    | 0.08            | —           | 0.04 m/s·tick  |
+| Mat     | 0.40 m/s    | 0.06            | 0.12        | 0.05           |
+| Carpet  | 0.28 m/s    | 0.05            | 0.14        | 0.05           |
+| Gravel  | 0.18 m/s    | 0.04            | 0.15        | —              |
+
+Softer motor gain on rough terrain prevents numerical instability (NaN/Inf QACC) at high wheel speeds over coarse surfaces. Ramp rates are per 0.1 s control tick; hold windows (2–4 consecutive matching windows) are required before committing a terrain change.
 
 ---
 
 ## Repository Layout
 
 ```
-terrain_sim.py            MuJoCo physics sim — heightfield terrain + 4-wheel rover
-generate_ml_dataset.py    Generate richer ML training data from MuJoCo (ml_dataset.csv)
-plot_scatter.py           Scatter plot: Vibration RMS vs Speed (presentation figure)
-plot_dataset_summary.py   Dataset summary table (presentation figure)
-dataset.csv               Original 108-sample dataset (3 PWM levels × 4 terrains)
-ml_dataset.csv            Richer 340-sample dataset (5 PWM levels × 4 terrains, + speed column)
-/firmware                 ESP32 C++ — IMU sampling, feature extraction, classifier, motor control
-/ml                       Python — training pipeline (collect → extract → train → export to C++)
-/dashboard                Flask/Streamlit — live label, confidence, PWM, slope state over MQTT
-/data                     Labelled vibration sessions (raw + processed CSVs)
-/docs                     Design doc, wiring diagrams, test results
+terrain_sim.py              MuJoCo physics sim — heightfield terrain + 4-wheel rover
+generate_ml_dataset.py      Generate ML training data from MuJoCo (ml_dataset.csv)
+mujoco_to_firmware.py       Train decision tree on ml_dataset.csv → export terrain_classifier.h
+plot_scatter.py             Scatter plot: Vibration RMS vs Speed (presentation figure)
+plot_dataset_summary.py     Dataset summary table (presentation figure)
+export_summary_csv.py       Export per-class statistics CSV
+
+dataset.csv                 Original 108-sample dataset (3 PWM × 4 terrains)
+ml_dataset.csv              340-sample dataset (5 PWM × 4 terrains, + speed column)
+ml_dataset_fresh.csv        Extended dataset from longer MuJoCo rollouts
+mujoco_classifier_report.txt  Training report: accuracy, confusion matrix, feature importances
+
+ml_classifier_plan.md       ML classifier design decisions
+transition_aware_features.md  Transition-pair ramp control design
+implementation_plan_v2.md   Full hardware build plan (wiring, firmware, dashboard, OLED)
+
+rover_firmware/
+    rover_firmware.ino      Main ESP32 firmware — IMU, OLED, WiFi AP, WebSocket, motors
+    dashboard.h             Embedded HTML/CSS/JS web dashboard (served as C string)
+    terrain_classifier.h    Auto-generated decision tree (from mujoco_to_firmware.py)
+    collect_data.py         PC-side Serial logger — writes hw_dataset.csv
+
+scatter_speed_vib.png       Vibration vs Speed scatter (why RMS alone fails)
+dataset_summary_table.png   Per-class feature summary table
+example_plots.png           MuJoCo accelerometer traces for all 4 terrains
 ```
 
 ---
 
 ## Getting Started
 
-### 1. Collect real vibration data
-Flash a minimal firmware that streams IMU data over MQTT (`rover/imu`), then drive the rover on each surface at 3 PWM levels (low/med/high) for ~3 minutes per session × 4 sessions per class.
+### 1. Flash firmware
 
-### 2. Train the classifier
+Install required Arduino libraries (Library Manager):
+- **WebSockets** by Markus Sattler
+- **Adafruit SSD1306**
+- **Adafruit GFX Library**
+- **ArduinoJson** by Benoît Blanchon
+
+Open `rover_firmware/rover_firmware.ino` in Arduino IDE, select **ESP32 Dev Module**, flash.
+
+### 2. Connect & control
+
+1. Connect phone/PC to WiFi `TerrainRover` (password: `rover1234`)
+2. Open `http://192.168.4.1` in browser
+3. Switch to **Training Mode**, select terrain, set PWM, tap GO
+4. Drive over each surface → data logs automatically every 1 second
+
+### 3. Collect real-world data
+
+Drive on each surface at 3 PWM levels (see table below), ~10 s per run:
+
+| Terrain | PWM levels |
+|---------|-----------|
+| Tile    | 180, 220, 255 |
+| Mat     | 150, 190, 230 |
+| Carpet  | 135, 170, 205 |
+| Gravel  | 100, 130, 165 |
+
+Download `hw_dataset.csv` from the dashboard, or use `rover_firmware/collect_data.py` over Serial.
+
+### 4. Re-train classifier (optional)
+
 ```bash
-cd ml/
-pip install scikit-learn numpy pandas micromlgen
-python train.py          # outputs terrain_classifier.h
+python mujoco_to_firmware.py   # trains on ml_dataset.csv by default
+# or pass your real hardware data:
+python mujoco_to_firmware.py --dataset hw_dataset.csv
+# → writes rover_firmware/terrain_classifier.h
 ```
 
-### 3. Flash full firmware
-Copy `terrain_classifier.h` into `/firmware`, build, and flash. The rover will classify terrain and apply the matching driving profile automatically.
-
-### 4. (Optional) Live dashboard
-```bash
-cd dashboard/
-pip install flask paho-mqtt
-python app.py
-```
-Open `http://localhost:5000` — shows live accel trace, terrain label, confidence, PWM, and slope state.
+Re-flash firmware. Switch to **Testing Mode** and compare predicted vs actual terrain labels.
 
 ---
 
-## Synthetic Data Bootstrap
+## Synthetic Data & Simulation
 
-If you don't have the hardware yet and want to test the ML pipeline end-to-end, `terrain_sim.py` can generate a labelled `dataset.csv` using MuJoCo physics:
+If you don't have the hardware yet, `terrain_sim.py` generates labelled data using MuJoCo physics:
 
 ```bash
-pip install mujoco
-python terrain_sim.py                        # generate dataset.csv
-python terrain_sim.py --view gravel --pwm 25 # interactive 3D viewer
+pip install mujoco numpy matplotlib
+python terrain_sim.py                           # generate dataset.csv + example_plots.png
+python terrain_sim.py --view gravel             # interactive 3D viewer (needs display)
+python terrain_sim.py --view-adaptive           # mixed-terrain adaptive controller demo
+python terrain_sim.py --view-adaptive --seed 42 # reproducible track
 ```
 
-> This is **not** a substitute for real data — bump amplitudes are estimates, not measurements. Use it to shake out bugs in the feature extraction → training pipeline before hardware is ready.
+> This is **not** a substitute for real data — bump amplitudes are estimates. Use it to validate the feature extraction and ML pipeline before hardware is ready.
+
+**Mixed-terrain terminal output:**
+```
+Track (6 segments): tile → gravel → carpet → mat → mat → gravel
+Controller: BLIND (IMU only)  |  Looping: yes
+
+t=  2.14s | RMS=0.082 | terrain→tile    | speed=0.55 m/s
+t=  4.30s | RMS=0.499 | terrain→carpet  | speed=0.28 m/s
+t=  4.35s | RMS=1.134 | terrain→gravel  | speed=0.18 m/s
+```
 
 ---
 
-## ML Classifier Pipeline
+## ML Classifier
 
 ### Why the RMS threshold fails
 
-The original `AdaptiveController` classifies terrain using a single RMS threshold:
-
+The original classifier used a single RMS threshold per terrain:
 ```python
-RMS_THRESHOLDS = [(0.10, "tile"), (0.25, "mat"), (0.55, "carpet"), (inf, "gravel")]
+RMS_THRESHOLDS = [(0.273, "carpet"), (0.354, "mat"), (0.447, "tile"), (inf, "gravel")]
 ```
+This breaks at higher speeds — **tile driven fast** produces RMS values that overlap with gravel and carpet. Vibration RMS is speed-dependent, so a single threshold per terrain can't separate all cases.
 
-This breaks at higher speeds: **tile driven fast** produces RMS values (0.6–1.6 m/s²) that overlap with gravel and carpet ranges. The root cause — vibration RMS is speed-dependent, so a single threshold per terrain can't separate all cases.
+### Solution: Decision tree on Speed + Vibration
 
-### Solution: ML classifier using Speed + Vibration
-
-By adding **rover speed (m/s)** as a second feature alongside the 5 vibration features, an ML classifier cleanly separates all four terrain classes. Speed is always distinct per terrain because each class runs at a different target velocity from the adaptive policy.
-
-### Generating the ML dataset
-
-```bash
-python generate_ml_dataset.py    # writes ml_dataset.csv (340 windows)
-```
-
-`generate_ml_dataset.py` runs MuJoCo rollouts with **5 PWM levels per terrain** (vs 3 in the original) and **10 s rollouts** (vs 6 s), producing 85 windows per class:
-
-| Terrain | PWM levels | Speed range (m/s) | Windows |
-|---------|------------|-------------------|---------|
-| Tile    | 140–255    | 0.29 – 0.53       | 85      |
-| Mat     | 120–225    | 0.25 – 0.46       | 85      |
-| Carpet  | 100–205    | 0.21 – 0.42       | 85      |
-| Gravel  | 80–165     | 0.16 – 0.34       | 85      |
-
-The CSV schema adds a `speed` column:
-```
-std, peak, rms, p2p, zcr, speed, label
-```
-
-### Generating presentation figures
-
-```bash
-# Scatter plot: Vibration RMS vs Speed (shows why RMS alone fails)
-python plot_scatter.py              # -> scatter_speed_vib.png
-
-# Dataset summary table
-python plot_dataset_summary.py      # -> dataset_summary_table.png
-```
-
-Both scripts use the `Agg` matplotlib backend (headless — no display required).
-
----
-
-## Adaptive Mixed-Terrain Simulation
-
-`terrain_sim.py` now supports a **mixed-terrain track** mode where the rover drives over multiple surface types in random order and adapts its speed and motor torque in real-time — purely from IMU vibration, with no terrain label fed to the controller.
-
-### How it works
+Adding **rover speed (m/s)** as a 6th feature alongside std, rms, p2p, zcr, peak cleanly separates all four terrain classes. The classifier is exported to pure C++ (no ML library needed on the ESP32).
 
 ```
-[MPU6050 Z-axis accel, rolling 50-sample buffer]
-        ↓
-   gravity-bias removal (subtract median)
-        ↓
-   vibration RMS  (re-computed every 25 physics steps ≈ 50 ms)
-        ↓
-   low-pass smoothed  (α = 0.20, prevents flickering at transitions)
-        ↓
-   roughness classify  →  speed + motor-gain lookup
-        ↓
-   update wheel velocity targets + actuator kv
+5-fold CV accuracy:  77.1% ± 11.2%  (simulation data)
+Feature importances: speed > std > rms > p2p > zcr > peak
 ```
 
-The controller is **entirely blind** — it never receives the terrain label, only what the IMU feels.
-
-### Adaptive Policy Table
-
-| Terrain (inferred) | RMS threshold (m/s²) | Target speed | Motor gain (kv) |
-|--------------------|----------------------|--------------|-----------------|
-| tile               | < 0.10               | 0.55 m/s     | 0.08 (fast)     |
-| mat                | 0.10 – 0.25          | 0.40 m/s     | 0.06            |
-| carpet             | 0.25 – 0.55          | 0.28 m/s     | 0.05            |
-| gravel             | ≥ 0.55               | 0.18 m/s     | 0.04 (careful)  |
-
-Softer motor gain on rough terrain prevents the numerical instability (`Nan/Inf QACC`) that occurs at high wheel speeds over coarse surfaces.
-
-### Track generation
-
-The heightfield is split into N equal segments along the X (travel) axis. Each segment is filled with a different terrain's band-limited noise profile, scaled to its elevation, with a 3-column cosine cross-fade at each boundary. The rover **loops continuously** — when it reaches the far end it is teleported back to the start.
-
-### Running the adaptive viewer
-
-```bash
-# Random track (different every run)
-python terrain_sim.py --view-adaptive
-
-# Reproducible track with fixed seed
-python terrain_sim.py --view-adaptive --seed 42
-
-# More segments (default is 6)
-python terrain_sim.py --view-adaptive --segments 8
-```
-
-**Terminal output while running:**
-```
-Track (6 segments): tile -> gravel -> carpet -> mat -> mat -> gravel
-Controller: BLIND (IMU only)  |  Looping: yes
-
-t=  2.14s | RMS=0.082 | terrain->tile    | speed=0.55 m/s
-t=  4.30s | RMS=0.499 | terrain->carpet  | speed=0.28 m/s
-t=  4.35s | RMS=1.134 | terrain->gravel  | speed=0.18 m/s
-```
-
-### Running all 4 single-terrain viewers simultaneously
-
-```powershell
-Start-Process python -ArgumentList "terrain_sim.py --view tile   --pwm 25 --speed 0.8"
-Start-Process python -ArgumentList "terrain_sim.py --view mat    --pwm 25 --speed 0.8"
-Start-Process python -ArgumentList "terrain_sim.py --view carpet --pwm 25 --speed 0.8"
-Start-Process python -ArgumentList "terrain_sim.py --view gravel --pwm 25 --speed 0.8"
-```
+Accuracy is expected to improve significantly when retrained on real hardware data (simulation vibration amplitudes are estimates).
 
 ---
 
 ## Key Constants
 
 | Constant | Value | Location |
-|----------|-------|----------|
+|----------|-------|---------|
 | Sample rate | 100 Hz | Firmware loop |
 | Window size | 100 samples (1 s) | Feature extraction |
-| Window overlap | 50% | Training pipeline |
-| Smoothing | majority vote, last 5 | Firmware |
-| Tree depth | 5 | Training |
-| Slope detect | 6° pitch | State machine |
-| Slope steep | 12° pitch | State machine |
-| Slope resume | 2° pitch | State machine |
-| Retreat distance | 15–20 cm | State machine |
+| Hold windows | 2–4 (per terrain pair) | Transition ramp |
+| OLED address | 0x3C | I²C bus |
+| MPU6050 address | 0x68 | I²C bus |
+| WiFi AP IP | 192.168.4.1 | WebServer |
+| WebSocket port | 81 | WebSocketsServer |
+| Serial baud | 115200 | USB Serial |
+| Motor supply | 7–12 V (3S Li-ion recommended) | Battery |
 
-All thresholds are initial estimates from the design phase — **tune on real hardware**, especially pitch thresholds and retreat distance.
-
----
-
-## Team
-
-2 × EEE · 2 × CSE — MBCET
