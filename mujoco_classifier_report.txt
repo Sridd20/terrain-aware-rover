@@ -1,0 +1,53 @@
+======================================================================
+MuJoCo -> Firmware Classifier Report
+======================================================================
+
+5-fold CV accuracy : 77.06% +/- 11.18%
+
+Per-class report (training set):
+              precision    recall  f1-score   support
+
+      carpet       0.65      0.79      0.71        85
+      gravel       1.00      0.84      0.91        85
+         mat       0.77      0.60      0.68        85
+        tile       0.85      1.00      0.92        85
+
+    accuracy                           0.81       340
+   macro avg       0.82      0.81      0.80       340
+weighted avg       0.82      0.81      0.80       340
+
+
+Confusion matrix (rows=true, cols=pred):
+  carpet    gravel    mat       tile    
+  carpet            67         0        15         3
+  gravel            14        71         0         0
+  mat               22         0        51        12
+  tile               0         0         0        85
+
+PWM -> Speed calibration:
+  slope     = 0.001471 m/s per PWM unit
+  intercept = -0.000265 m/s
+  RMSE      = 0.0001 m/s
+
+Per-terrain speed table (sim vs. linear model):
+  terrain     pwm   sim_speed  pred_speed
+  tile        140      0.2058 m/s      0.2057 m/s
+  tile        175      0.2573 m/s      0.2571 m/s
+  tile        210      0.3087 m/s      0.3086 m/s
+  tile        235      0.3454 m/s      0.3454 m/s
+  tile        255      0.3749 m/s      0.3748 m/s
+  mat         120      0.1763 m/s      0.1762 m/s
+  mat         150      0.2204 m/s      0.2204 m/s
+  mat         180      0.2645 m/s      0.2645 m/s
+  mat         205      0.3012 m/s      0.3013 m/s
+  mat         225      0.3306 m/s      0.3307 m/s
+  carpet      100      0.1469 m/s      0.1468 m/s
+  carpet      130      0.1910 m/s      0.1909 m/s
+  carpet      160      0.2351 m/s      0.2351 m/s
+  carpet      185      0.2719 m/s      0.2718 m/s
+  carpet      205      0.3012 m/s      0.3013 m/s
+  gravel       80      0.1175 m/s      0.1174 m/s
+  gravel      105      0.1540 m/s      0.1542 m/s
+  gravel      130      0.1908 m/s      0.1909 m/s
+  gravel      150      0.2201 m/s      0.2204 m/s
+  gravel      165      0.2422 m/s      0.2424 m/s
