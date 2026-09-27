@@ -8,7 +8,7 @@ MPU6050 (100 Hz IMU)
     → 5-D feature vector: std, rms, p2p, zcr, speed
     → on-device decision tree classifier  (terrain_classifier.h)
     → terrain label: tile / mat / carpet / gravel
-    → adaptive PWM + transition ramp control
+    → adaptive PWM + transition-pair ramp control
     → L298N dual H-bridge → 2× DC motors
 ```
 
@@ -40,16 +40,20 @@ Different surfaces have very different traction properties. A rover running at f
 
 ### Pin Map
 
-| Signal | ESP32 GPIO |
-|--------|-----------|
-| L298N IN1 (Left dir A) | 27 |
-| L298N IN2 (Left dir B) | 26 |
-| L298N IN3 (Right dir A) | 25 |
-| L298N IN4 (Right dir B) | 33 |
-| L298N ENA (Left PWM) | 14 |
-| L298N ENB (Right PWM) | 12 |
-| MPU6050 / OLED SDA | 21 |
-| MPU6050 / OLED SCL | 22 |
+| Signal | ESP32 GPIO | Notes |
+|--------|-----------|-------|
+| L298N IN1 (Left dir A) | 27 | |
+| L298N IN2 (Left dir B) | 26 | |
+| L298N IN3 (Right dir A) | 25 | ADC2_CH8 — see note below |
+| L298N IN4 (Right dir B) | 33 | |
+| L298N ENA (Left PWM) | 14 | LEDC ch 4, 1 kHz |
+| L298N ENB (Right PWM) | **13** | LEDC ch 5, 1 kHz — **not 12** |
+| MPU6050 / OLED SDA | 21 | |
+| MPU6050 / OLED SCL | 22 | |
+
+> **ENB pin:** the firmware uses **GPIO 13** for ENB, not GPIO 12. GPIO 12 is a bootstrap pin on ESP32 that can prevent booting if held HIGH at power-on.
+
+> **GPIO 25 (IN3) — ADC2 / WiFi conflict:** GPIO 25 is `ADC2_CH8` on the ESP32. When `WiFi.softAP()` starts, the WiFi stack uses ADC2 internally for RF calibration and silently reconfigures ADC2 pins as analog inputs, which breaks `digitalWrite`. The firmware works around this by re-asserting `pinMode(OUTPUT)` inside `setRightMotor()` on every call. If you redesign the wiring, move IN3 to a non-ADC2 GPIO (e.g. GPIO 16, 17, or 18) to avoid this entirely.
 
 ---
 
@@ -115,14 +119,37 @@ When **predicted ≠ actual**, the predicted label inverts (white on black) so m
 
 ## Adaptive Driving Profiles
 
-| Terrain | Target speed | Motor gain (kv) | Ramp to tile | Ramp to gravel |
-|---------|-------------|-----------------|-------------|----------------|
-| Tile    | 0.55 m/s    | 0.08            | —           | 0.04 m/s·tick  |
-| Mat     | 0.40 m/s    | 0.06            | 0.12        | 0.05           |
-| Carpet  | 0.28 m/s    | 0.05            | 0.14        | 0.05           |
-| Gravel  | 0.18 m/s    | 0.04            | 0.15        | —              |
+Speed targets and turn gains are stored in `terrain_classifier.h` and applied automatically after each terrain classification:
 
-Softer motor gain on rough terrain prevents numerical instability (NaN/Inf QACC) at high wheel speeds over coarse surfaces. Ramp rates are per 0.1 s control tick; hold windows (2–4 consecutive matching windows) are required before committing a terrain change.
+| Terrain | Max PWM | Accel Ramp (s) | Turn Gain |
+|---------|---------|----------------|-----------|
+| Tile    | 220     | 0.20           | 1.00      |
+| Mat     | 190     | 0.30           | 0.90      |
+| Carpet  | 170     | 0.40           | 0.80      |
+| Gravel  | 130     | 0.60           | 0.60      |
+
+Lower max PWM and a longer acceleration ramp on rough terrain prevent wheel slip. Reduced turn gain on loose surfaces maintains straight-line traction during cornering.
+
+### Transition-Pair Ramp Control
+
+Rather than snapping instantly to the new terrain's speed target, the controller interpolates smoothly using a per-pair ramp table. The new label must be confirmed over **K consecutive 1-second windows** before committing (prevents false triggers at noisy surface seams).
+
+| From → To       | Ramp Rate (m/s·tick) | Hold Windows | Rationale                         |
+|-----------------|---------------------|--------------|-----------------------------------|
+| tile → gravel   | 0.04                | 4            | Sudden rough — brake hard, wait   |
+| tile → carpet   | 0.08                | 3            | Moderate softening                |
+| tile → mat      | 0.10                | 2            | Subtle — quick ramp               |
+| mat → gravel    | 0.05                | 4            | Rough incoming — brake firmly     |
+| mat → carpet    | 0.09                | 2            | Near-similar — gentle             |
+| mat → tile      | 0.12                | 2            | Smoother — ease up                |
+| carpet → gravel | 0.05                | 4            | Big jump in roughness             |
+| carpet → mat    | 0.10                | 2            | Slight improvement                |
+| carpet → tile   | 0.14                | 1            | Much smoother — accelerate freely |
+| gravel → carpet | 0.08                | 3            | Some improvement — ramp gently    |
+| gravel → mat    | 0.10                | 2            | Clear improvement                 |
+| gravel → tile   | 0.15                | 1            | Suddenly smooth — quick ramp      |
+
+> **Ramp Rate** is per 0.1 s control tick (one feature window). **Hold Windows** = consecutive matching labels required before the transition is committed.
 
 ---
 
@@ -132,17 +159,19 @@ Softer motor gain on rough terrain prevents numerical instability (NaN/Inf QACC)
 terrain_sim.py              MuJoCo physics sim — heightfield terrain + 4-wheel rover
 generate_ml_dataset.py      Generate ML training data from MuJoCo (ml_dataset.csv)
 mujoco_to_firmware.py       Train decision tree on ml_dataset.csv → export terrain_classifier.h
+terrain_classifier.py       Standalone sklearn classifier — scatter plots, feature importances
 plot_scatter.py             Scatter plot: Vibration RMS vs Speed (presentation figure)
 plot_dataset_summary.py     Dataset summary table (presentation figure)
 export_summary_csv.py       Export per-class statistics CSV
 
-dataset.csv                 Original 108-sample dataset (3 PWM × 4 terrains)
-ml_dataset.csv              340-sample dataset (5 PWM × 4 terrains, + speed column)
+dataset.csv                 Original 108-sample dataset (3 PWM × 4 terrains × 9 samples)
+ml_dataset.csv              340-sample dataset (5 PWM × 4 terrains × 17 samples, + speed)
 ml_dataset_fresh.csv        Extended dataset from longer MuJoCo rollouts
+dataset_summary.csv         Per-class feature statistics (std, rms, p2p, zcr, speed range)
 mujoco_classifier_report.txt  Training report: accuracy, confusion matrix, feature importances
 
-ml_classifier_plan.md       ML classifier design decisions
-transition_aware_features.md  Transition-pair ramp control design
+ml_classifier_plan.md       ML classifier design decisions and presentation slide plan
+transition_aware_features.md  Transition-pair ramp control architecture
 implementation_plan_v2.md   Full hardware build plan (wiring, firmware, dashboard, OLED)
 
 rover_firmware/
@@ -231,6 +260,17 @@ t=  4.35s | RMS=1.134 | terrain→gravel  | speed=0.18 m/s
 
 ## ML Classifier
 
+### Dataset
+
+The classifier is trained on **340 windows** generated from MuJoCo rollouts across 5 PWM levels × 4 terrain classes (85 samples per class):
+
+| Terrain | Samples | Avg STD | Avg RMS | Avg P2P | Avg ZCR | Speed range (m/s) |
+|---------|---------|---------|---------|---------|---------|-------------------|
+| Tile    | 85      | 0.413   | 0.416   | 3.844   | 53.2    | 0.288 – 0.525     |
+| Mat     | 85      | 0.290   | 0.291   | 2.167   | 55.4    | 0.247 – 0.463     |
+| Carpet  | 85      | 0.254   | 0.255   | 2.020   | 54.7    | 0.206 – 0.422     |
+| Gravel  | 85      | 0.476   | 0.477   | 4.615   | 46.3    | 0.165 – 0.340     |
+
 ### Why the RMS threshold fails
 
 The original classifier used a single RMS threshold per terrain:
@@ -241,28 +281,50 @@ This breaks at higher speeds — **tile driven fast** produces RMS values that o
 
 ### Solution: Decision tree on Speed + Vibration
 
-Adding **rover speed (m/s)** as a 6th feature alongside std, rms, p2p, zcr, peak cleanly separates all four terrain classes. The classifier is exported to pure C++ (no ML library needed on the ESP32).
+Adding **rover speed (m/s)** as a 5th feature alongside std, rms, p2p, zcr cleanly separates all four terrain classes. The classifier is a depth-5 decision tree exported to pure C++ — no ML library needed on the ESP32.
 
 ```
-5-fold CV accuracy:  77.1% ± 11.2%  (simulation data)
-Feature importances: speed > std > rms > p2p > zcr > peak
+5-fold CV accuracy:  77.1% ± 11.2%  (340-sample simulation dataset)
+Training set accuracy: 81.2%
+Feature importances: speed > std > rms > p2p > zcr
 ```
+
+**Per-class results (training set):**
+
+| Class  | Precision | Recall | F1-Score |
+|--------|-----------|--------|----------|
+| carpet | 0.65      | 0.79   | 0.71     |
+| gravel | 1.00      | 0.84   | 0.91     |
+| mat    | 0.77      | 0.60   | 0.68     |
+| tile   | 0.85      | 1.00   | 0.92     |
 
 Accuracy is expected to improve significantly when retrained on real hardware data (simulation vibration amplitudes are estimates).
+
+### PWM → Speed Calibration
+
+The firmware derives rover speed from PWM using a linear model fitted from MuJoCo rollouts:
+
+```
+speed_ms = 0.001471 × PWM − 0.000265    (RMSE: 0.0001 m/s)
+```
+
+This calibration is embedded in `terrain_classifier.h` as `PWM_SPEED_SLOPE` and `PWM_SPEED_INTERCEPT`.
 
 ---
 
 ## Key Constants
 
 | Constant | Value | Location |
-|----------|-------|---------|
+|----------|-------|----------|
 | Sample rate | 100 Hz | Firmware loop |
 | Window size | 100 samples (1 s) | Feature extraction |
-| Hold windows | 2–4 (per terrain pair) | Transition ramp |
+| Hold windows | 1–4 (per terrain pair) | Transition ramp table |
 | OLED address | 0x3C | I²C bus |
 | MPU6050 address | 0x68 | I²C bus |
 | WiFi AP IP | 192.168.4.1 | WebServer |
 | WebSocket port | 81 | WebSocketsServer |
 | Serial baud | 115200 | USB Serial |
 | Motor supply | 7–12 V (3S Li-ion recommended) | Battery |
+| PWM→speed slope | 0.001471 m/s per PWM unit | terrain_classifier.h |
+| PWM→speed intercept | −0.000265 m/s | terrain_classifier.h |
 

@@ -61,9 +61,19 @@ const char* AP_PASSWORD = "rover1234";
 #define PIN_ENB  13   // Rear-RIGHT motor PWM speed  (ENB jumper MUST be removed; moved from GPIO12)
 //   NOTE: if ESP32 fails to boot with ENB on GPIO12, move ENB to GPIO13.
 
-// LEDC (v3.x API — ledcAttach uses pin directly, no channel numbers needed)
+// LEDC — explicit channel numbers keep motor PWM away from library defaults
 #define LEDC_FREQ_HZ   1000
 #define LEDC_BITS      8
+#define LEDC_CH_ENA    4    // channel 4 → PIN_ENA (left  motor)
+#define LEDC_CH_ENB    5    // channel 5 → PIN_ENB (right motor)
+
+// Attach PWM pins BEFORE WiFi so the channels are locked
+inline void initMotorPWM() {
+    ledcAttachChannel(PIN_ENA, LEDC_FREQ_HZ, LEDC_BITS, LEDC_CH_ENA);
+    ledcAttachChannel(PIN_ENB, LEDC_FREQ_HZ, LEDC_BITS, LEDC_CH_ENB);
+    Serial.printf("[MOTORS] LEDC: ENA=GPIO%d ch%d  ENB=GPIO%d ch%d\n",
+        PIN_ENA, LEDC_CH_ENA, PIN_ENB, LEDC_CH_ENB);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // OLED
@@ -251,18 +261,22 @@ float classifyConfidence() {
 // Set individual motor: positive pwm = forward, negative = backward, 0 = stop
 void setLeftMotor(int pwm) {
     bool fwd = (pwm >= 0);
-    int  spd = abs(pwm);
+    int  spd = constrain(abs(pwm), 0, 255);
     digitalWrite(PIN_IN1, fwd ? HIGH : LOW);
     digitalWrite(PIN_IN2, fwd ? LOW  : HIGH);
-    analogWrite(PIN_ENA, constrain(spd, 0, 255));
+    ledcWrite(PIN_ENA, spd);
 }
 
 void setRightMotor(int pwm) {
     bool fwd = (pwm >= 0);
-    int  spd = abs(pwm);
+    int  spd = constrain(abs(pwm), 0, 255);
+    // GPIO 25 (IN3) is ADC2_CH8 — WiFi.softAP() reconfigures ADC2 pins as analog
+    // inputs, overriding pinMode(OUTPUT). Re-assert OUTPUT on every call.
+    pinMode(PIN_IN3, OUTPUT);
+    pinMode(PIN_IN4, OUTPUT);
     digitalWrite(PIN_IN3, fwd ? HIGH : LOW);
     digitalWrite(PIN_IN4, fwd ? LOW  : HIGH);
-    analogWrite(PIN_ENB, constrain(spd, 0, 255));
+    ledcWrite(PIN_ENB, spd);
 }
 
 // Drive both motors — same PWM, same direction (forward/backward)
@@ -622,9 +636,11 @@ void setup() {
     display.display();
 
     // ── Motor pins ───────────────────────────────────────────────────────────
+    // Direction pins
     pinMode(PIN_IN1, OUTPUT); pinMode(PIN_IN2, OUTPUT);
     pinMode(PIN_IN3, OUTPUT); pinMode(PIN_IN4, OUTPUT);
-    pinMode(PIN_ENA, OUTPUT); pinMode(PIN_ENB, OUTPUT);
+    // Attach PWM pins to LEDC BEFORE WiFi starts — prevents channel conflicts
+    initMotorPWM();
     stopMotors();
     Serial.println("[MOTORS] initialised");
 
