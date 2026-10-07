@@ -36,14 +36,14 @@ struct TerrainProfile {
     float   turnGain;
 };
 
-// Ordered alphabetically: carpet, gravel, mat, tile
+// Ordered alphabetically: carpet, gravel, pavement, tile
 static const TerrainProfile TERRAIN_PROFILES[] = {
     {170, 0.40f, 0.80f},  // carpet
     {130, 0.60f, 0.60f},  // gravel
-    {190, 0.30f, 0.90f},  // mat
+    {190, 0.30f, 0.90f},  // pavement
     {220, 0.20f, 1.00f},  // tile
 };
-static const char* TERRAIN_NAMES[] = {"carpet", "gravel", "mat", "tile"};
+static const char* TERRAIN_NAMES[] = {"carpet", "gravel", "pavement", "tile"};
 
 // -- Extern declarations (defined in rover_firmware.ino) ------------
 extern float feat_std;
@@ -75,9 +75,9 @@ inline String classifyTerrain() {
             } else {
                 if (feat_rms <= 0.220056f) {
                     if (feat_speed <= 0.198398f) {
-                        // leaf: mat  conf=0.53  (0, 0, 1, 0)
+                        // leaf: pavement  conf=0.53  (0, 0, 1, 0)
                         g_last_confidence = 0.5312f;
-                        return "mat";
+                        return "pavement";
                     } else {
                         // leaf: tile  conf=0.69  (0, 0, 0, 1)
                         g_last_confidence = 0.6939f;
@@ -89,9 +89,9 @@ inline String classifyTerrain() {
                         g_last_confidence = 0.5714f;
                         return "carpet";
                     } else {
-                        // leaf: mat  conf=1.00  (0, 0, 1, 0)
+                        // leaf: pavement  conf=1.00  (0, 0, 1, 0)
                         g_last_confidence = 1.0000f;
-                        return "mat";
+                        return "pavement";
                     }
                 }
             }
@@ -125,9 +125,9 @@ inline String classifyTerrain() {
                 g_last_confidence = 1.0000f;
                 return "tile";
             } else {
-                // leaf: mat  conf=1.00  (0, 0, 1, 0)
+                // leaf: pavement  conf=1.00  (0, 0, 1, 0)
                 g_last_confidence = 1.0000f;
-                return "mat";
+                return "pavement";
             }
         } else {
             // leaf: tile  conf=1.00  (0, 0, 0, 1)

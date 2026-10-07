@@ -39,7 +39,7 @@ OVERLAP    = 0.5    # window overlap
 # Five PWM levels per terrain
 PWM_LEVELS_ML = {
     "tile":   [140, 175, 210, 235, 255],
-    "mat":    [120, 150, 180, 205, 225],
+    "pavement":    [120, 150, 180, 205, 225],
     "carpet": [100, 130, 160, 185, 205],
     "gravel": [ 80, 105, 130, 150, 165],
 }
@@ -48,7 +48,7 @@ OUT_HEADER = ROOT / "rover_firmware" / "terrain_classifier.h"
 OUT_REPORT = ROOT / "mujoco_classifier_report.txt"
 OUT_CSV    = ROOT / "ml_dataset_fresh.csv"
 
-TERRAIN_CLASSES = ["carpet", "gravel", "mat", "tile"]  # alphabetical for sklearn
+TERRAIN_CLASSES = ["carpet", "gravel", "pavement", "tile"]  # alphabetical for sklearn
 
 
 # ---------------------------------------------------------------------------
@@ -230,14 +230,14 @@ def write_header(clf, score_mean, score_std, n_samples,
         "    float   turnGain;\n"
         "};\n"
         "\n"
-        "// Ordered alphabetically: carpet, gravel, mat, tile\n"
+        "// Ordered alphabetically: carpet, gravel, pavement, tile\n"
         "static const TerrainProfile TERRAIN_PROFILES[] = {\n"
         "    {170, 0.40f, 0.80f},  // carpet\n"
         "    {130, 0.60f, 0.60f},  // gravel\n"
-        "    {190, 0.30f, 0.90f},  // mat\n"
+        "    {190, 0.30f, 0.90f},  // pavement\n"
         "    {220, 0.20f, 1.00f},  // tile\n"
         "};\n"
-        'static const char* TERRAIN_NAMES[] = {"carpet", "gravel", "mat", "tile"};\n'
+        'static const char* TERRAIN_NAMES[] = {"carpet", "gravel", "pavement", "tile"};\n'
         "\n"
         "// -- Extern declarations (defined in rover_firmware.ino) ------------\n"
         "extern float feat_std;\n"

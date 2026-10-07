@@ -21,7 +21,7 @@ with open("ml_dataset.csv", newline="") as f:
             "speed": float(row["speed"]),
         })
 
-TERRAIN_ORDER = ["tile", "mat", "carpet", "gravel"]
+TERRAIN_ORDER = ["tile", "pavement", "carpet", "gravel"]
 
 out_rows = []
 for key in TERRAIN_ORDER:

@@ -219,7 +219,7 @@ The web dashboard HTML/CSS/JS is embedded as a C string in this header file and 
 ├─────────────────────────────────────────────────┤
 │                                                  │
 │  ┌─── TERRAIN SELECTOR (Actual) ──────────────┐ │
-│  │  [ TILE ]  [ MAT ]  [ CARPET ]  [ GRAVEL ] │ │
+│  │  [ TILE ]  [ pavement ]  [ CARPET ]  [ GRAVEL ] │ │
 │  │       ↑ Tap to label current terrain        │ │
 │  └─────────────────────────────────────────────┘ │
 │                                                  │
@@ -256,7 +256,7 @@ The web dashboard HTML/CSS/JS is embedded as a C string in this header file and 
 
 | Feature | Description |
 |---------|------------|
-| **Terrain Selector** | 4 large buttons (Tile / Mat / Carpet / Gravel) to label the terrain the rover is currently on. Selected label is sent to ESP32 and tagged on every data row. Active button is highlighted with the terrain's color. |
+| **Terrain Selector** | 4 large buttons (Tile / Pavement / Carpet / Gravel) to label the terrain the rover is currently on. Selected label is sent to ESP32 and tagged on every data row. Active button is highlighted with the terrain's color. |
 | **Classification Result** | Side-by-side display of **Actual** (your label) vs **Predicted** (ML model's output). Shows a ✓ MATCH (green) or ✗ MISMATCH (red) indicator. Confidence bar shows model certainty when available. |
 | **Motor Control** | PWM slider (0–255) for setting motor speed. GO / STOP buttons with visual state feedback. Current speed in m/s displayed. |
 | **Live Vibration Gauges** | Real-time bar gauges for all 5 features (std, rms, p2p, zcr, speed), updated every 1-second window. Bars are color-coded by terrain prediction. |
@@ -389,7 +389,7 @@ Python script to run on PC, connects over Serial (COM port), sends PWM/LABEL com
 
 ### Data Collection Protocol
 1. Place rover on **tile** → tap **TILE** on dashboard → set PWM to 180 → tap GO → let it drive 10s → repeat for PWM 220, 255
-2. Repeat for **mat** (PWM 150, 190, 230), **carpet** (PWM 135, 170, 205), **gravel** (PWM 100, 130, 165)
+2. Repeat for **pavement** (PWM 150, 190, 230), **carpet** (PWM 135, 170, 205), **gravel** (PWM 100, 130, 165)
 3. Tap **⬇ Download CSV** on dashboard to save the session, or use `collect_data.py` for Serial logging → produces `hw_dataset.csv`
 4. Compare `hw_dataset.csv` distributions against `ml_dataset.csv` (simulation) to validate the simulation's fidelity
 

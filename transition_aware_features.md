@@ -26,15 +26,15 @@ Instead of instantly applying the new terrain's target speed, the controller:
 |-------------------|-----------------|--------------|-------------------------------------|
 | tile → gravel     | 0.04            | 4            | Sudden rough — brake hard, wait     |
 | tile → carpet     | 0.08            | 3            | Moderate softening                  |
-| tile → mat        | 0.10            | 2            | Subtle — quick ramp                 |
-| mat → gravel      | 0.05            | 4            | Rough incoming — brake firmly       |
-| mat → carpet      | 0.09            | 2            | Near-similar — gentle               |
-| mat → tile        | 0.12            | 2            | Smoother — can ease up              |
+| tile → pavement        | 0.10            | 2            | Subtle — quick ramp                 |
+| pavement → gravel      | 0.05            | 4            | Rough incoming — brake firmly       |
+| pavement → carpet      | 0.09            | 2            | Near-similar — gentle               |
+| pavement → tile        | 0.12            | 2            | Smoother — can ease up              |
 | carpet → gravel   | 0.05            | 4            | Big jump in roughness               |
-| carpet → mat      | 0.10            | 2            | Slight improvement                  |
+| carpet → pavement      | 0.10            | 2            | Slight improvement                  |
 | carpet → tile     | 0.14            | 1            | Much smoother — accelerate freely   |
 | gravel → carpet   | 0.08            | 3            | Some improvement — ramp up gently   |
-| gravel → mat      | 0.10            | 2            | Clear improvement                   |
+| gravel → pavement      | 0.10            | 2            | Clear improvement                   |
 | gravel → tile     | 0.15            | 1            | Suddenly smooth — allow quick ramp  |
 
 > **Ramp Rate**: how fast speed changes per control tick (m/s per 0.1 s window).

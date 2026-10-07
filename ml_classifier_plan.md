@@ -7,13 +7,13 @@ The current `AdaptiveController` in `terrain_sim.py` uses a simple RMS threshold
 ```python
 RMS_THRESHOLDS = [
     (0.10, "tile"),
-    (0.25, "mat"),
+    (0.25, "pavement"),
     (0.55, "carpet"),
     (float("inf"), "gravel"),
 ]
 ```
 
-This fails because mat/carpet/tile overlap significantly in RMS at higher PWM levels (tile at PWM=255 has std~1.5, similar to gravel).
+This fails because pavement/carpet/tile overlap significantly in RMS at higher PWM levels (tile at PWM=255 has std~1.5, similar to gravel).
 
 **Root cause:** RMS vibration alone is not sufficient — the same terrain produces different RMS at different speeds. Speed is a critical second feature.
 
@@ -58,7 +58,7 @@ Alternatives considered:
 
 ### 1. Why the Threshold Method Fails (Motivation)
 - Show a scatter plot: **X = Vibration RMS, Y = Speed (m/s)**, color-coded by terrain class
-- Key insight: mat, carpet, and tile overlap in vibration alone
+- Key insight: pavement, carpet, and tile overlap in vibration alone
 - Speed is the differentiator — gravel has high vibration AND low speed; carpet has medium vibration AND medium-low speed
 
 ---
@@ -68,7 +68,7 @@ Alternatives considered:
 | Terrain | Samples | Avg Vibration STD | Avg Speed (m/s) |
 |---------|---------|-------------------|-----------------|
 | Tile    | 27      | ~0.55             | 0.55            |
-| Mat     | 27      | ~0.34             | 0.40            |
+| pavement     | 27      | ~0.34             | 0.40            |
 | Carpet  | 27      | ~0.30             | 0.28            |
 | Gravel  | 27      | ~0.53             | 0.18            |
 
@@ -81,7 +81,7 @@ Alternatives considered:
 **Left:** RMS Threshold classifier (current system)
 **Right:** ML Random Forest classifier (speed + vibration)
 
-- The threshold method will confuse mat↔carpet and tile↔gravel at edge PWM values
+- The threshold method will confuse pavement↔carpet and tile↔gravel at edge PWM values
 - The ML classifier should achieve significantly higher accuracy
 
 ---

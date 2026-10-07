@@ -67,6 +67,17 @@ const char* AP_PASSWORD = "rover1234";
 #define LEDC_CH_ENA    4    // channel 4 → PIN_ENA (left  motor)
 #define LEDC_CH_ENB    5    // channel 5 → PIN_ENB (right motor)
 
+// ── Soft-start ramp config ────────────────────────────────────────────────────
+// Ramps PWM from 0 → target in RAMP_STEPS steps with RAMP_STEP_MS delay each.
+// Total ramp time ≈ 15 × 10 ms = 150 ms.  This limits inrush current and
+// prevents the 5 V rail from collapsing enough to brown-out the ESP32 at
+// motor startup.  Hardware fix: also add:
+//   • 470–1000 µF electrolytic cap across L298N 12 V / VCC–GND input
+//   • 100–220 µF electrolytic cap across buck-converter 5 V / GND output
+//     placed as close as possible to the ESP32 VIN / GND pins.
+#define RAMP_STEPS    15
+#define RAMP_STEP_MS  10
+
 // Attach PWM pins BEFORE WiFi so the channels are locked
 inline void initMotorPWM() {
     ledcAttachChannel(PIN_ENA, LEDC_FREQ_HZ, LEDC_BITS, LEDC_CH_ENA);
@@ -286,6 +297,24 @@ void setMotors(int pwm, bool forward) {
     setRightMotor(v);
 }
 
+// ── Soft-start ramp ───────────────────────────────────────────────────────────
+// Ramps both motors from 0 up to |targetPwm| over RAMP_STEPS × RAMP_STEP_MS.
+// 'forward' true → forward drive; false → backward drive.
+// Limits the inrush current spike that causes the 5 V rail to sag and
+// brown-out the ESP32 when motors first energise.
+void rampMotors(int targetPwm, bool forward) {
+    int sign = forward ? 1 : -1;
+    for (int step = 1; step <= RAMP_STEPS; step++) {
+        int rampPwm = (targetPwm * step) / RAMP_STEPS;
+        setLeftMotor(sign * rampPwm);
+        setRightMotor(sign * rampPwm);
+        delay(RAMP_STEP_MS);
+    }
+    // Ensure we end exactly at the requested PWM
+    setLeftMotor(sign * targetPwm);
+    setRightMotor(sign * targetPwm);
+}
+
 // Turn: reduce inner wheel, keep outer at full PWM
 // direction: -1 = turn left, +1 = turn right
 void turnMotors(int pwm, int direction) {
@@ -301,6 +330,21 @@ void turnMotors(int pwm, int direction) {
     }
 }
 
+// Ramp then turn — soft-starts to turnMotors target to limit inrush current.
+void rampTurnMotors(int pwm, int direction) {
+    int outer = pwm;
+    int inner = pwm * 4 / 10;
+    for (int step = 1; step <= RAMP_STEPS; step++) {
+        int ro = (outer * step) / RAMP_STEPS;
+        int ri = (inner * step) / RAMP_STEPS;
+        if (direction < 0) { setLeftMotor(ri); setRightMotor(ro); }
+        else               { setLeftMotor(ro); setRightMotor(ri); }
+        delay(RAMP_STEP_MS);
+    }
+    if (direction < 0) { setLeftMotor(inner); setRightMotor(outer); }
+    else               { setLeftMotor(outer); setRightMotor(inner); }
+}
+
 // Spin in place (left motor back, right motor forward)
 void spinMotors(int pwm, int direction) {
     if (direction < 0) {          // spin left
@@ -310,6 +354,18 @@ void spinMotors(int pwm, int direction) {
         setLeftMotor(pwm);
         setRightMotor(-pwm);
     }
+}
+
+// Ramp then spin — soft-starts to spinMotors target.
+void rampSpinMotors(int pwm, int direction) {
+    for (int step = 1; step <= RAMP_STEPS; step++) {
+        int rp = (pwm * step) / RAMP_STEPS;
+        if (direction < 0) { setLeftMotor(-rp); setRightMotor( rp); }
+        else               { setLeftMotor( rp); setRightMotor(-rp); }
+        delay(RAMP_STEP_MS);
+    }
+    if (direction < 0) { setLeftMotor(-pwm); setRightMotor( pwm); }
+    else               { setLeftMotor( pwm); setRightMotor(-pwm); }
 }
 
 void stopMotors() {
@@ -504,7 +560,7 @@ void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t lengt
     } else if (strcmp(cmd, "go") == 0) {
         motorsRunning = true;
         if (currentPwm == 0) currentPwm = 150;
-        setMotors(currentPwm, true);
+        rampMotors(currentPwm, true);   // soft-start: ramp 0→PWM to limit inrush
 
     } else if (strcmp(cmd, "stop") == 0) {
         stopMotors();
@@ -515,7 +571,7 @@ void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t lengt
         int d = (strcmp(dir, "left") == 0) ? -1 : 1;
         motorsRunning = true;
         if (currentPwm == 0) currentPwm = 150;
-        turnMotors(currentPwm, d);
+        rampTurnMotors(currentPwm, d);  // soft-start to limit inrush
 
     } else if (strcmp(cmd, "spin") == 0) {
         // {"cmd":"spin","dir":"left"|"right"}
@@ -523,7 +579,7 @@ void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t lengt
         int d = (strcmp(dir, "left") == 0) ? -1 : 1;
         motorsRunning = true;
         if (currentPwm == 0) currentPwm = 150;
-        spinMotors(currentPwm, d);
+        rampSpinMotors(currentPwm, d);  // soft-start to limit inrush
 
     } else if (strcmp(cmd, "rec") == 0) {
         recording = (bool)doc["value"];
@@ -573,17 +629,17 @@ void handleSerial() {
     else if (line == "GO") {
         motorsRunning = true;
         if (currentPwm == 0) currentPwm = 150;
-        setMotors(currentPwm, true);
+        rampMotors(currentPwm, true);   // soft-start
     }
     else if (line == "BACK") {
         motorsRunning = true;
         if (currentPwm == 0) currentPwm = 150;
-        setMotors(currentPwm, false);
+        rampMotors(currentPwm, false);  // soft-start
     }
-    else if (line == "TURN LEFT")  { motorsRunning=true; if(!currentPwm) currentPwm=150; turnMotors(currentPwm,-1); }
-    else if (line == "TURN RIGHT") { motorsRunning=true; if(!currentPwm) currentPwm=150; turnMotors(currentPwm, 1); }
-    else if (line == "SPIN LEFT")  { motorsRunning=true; if(!currentPwm) currentPwm=150; spinMotors(currentPwm,-1); }
-    else if (line == "SPIN RIGHT") { motorsRunning=true; if(!currentPwm) currentPwm=150; spinMotors(currentPwm, 1); }
+    else if (line == "TURN LEFT")  { motorsRunning=true; if(!currentPwm) currentPwm=150; rampTurnMotors(currentPwm,-1); }
+    else if (line == "TURN RIGHT") { motorsRunning=true; if(!currentPwm) currentPwm=150; rampTurnMotors(currentPwm, 1); }
+    else if (line == "SPIN LEFT")  { motorsRunning=true; if(!currentPwm) currentPwm=150; rampSpinMotors(currentPwm,-1); }
+    else if (line == "SPIN RIGHT") { motorsRunning=true; if(!currentPwm) currentPwm=150; rampSpinMotors(currentPwm, 1); }
     else if (line == "STOP")       { stopMotors(); }
     else if (line == "REC ON")               { recording = true; }
     else if (line == "REC OFF")              { recording = false; samplesLogged = 0; }
