@@ -39,7 +39,7 @@ OVERLAP    = 0.5    # window overlap
 # Five PWM levels per terrain
 PWM_LEVELS_ML = {
     "tile":   [140, 175, 210, 235, 255],
-    "mat":    [120, 150, 180, 205, 225],
+    "pavement":    [120, 150, 180, 205, 225],
     "carpet": [100, 130, 160, 185, 205],
     "gravel": [ 80, 105, 130, 150, 165],
 }
@@ -48,7 +48,7 @@ OUT_HEADER = ROOT / "rover_firmware" / "terrain_classifier.h"
 OUT_REPORT = ROOT / "mujoco_classifier_report.txt"
 OUT_CSV    = ROOT / "ml_dataset_fresh.csv"
 
-TERRAIN_CLASSES = ["carpet", "gravel", "mat", "tile"]  # alphabetical for sklearn
+TERRAIN_CLASSES = ["carpet", "gravel", "pavement", "tile"]  # alphabetical for sklearn
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +91,7 @@ def generate_dataset():
                 f = sim.extract_features(w)
                 rows.append({
                     "std":   f["std"],
+                    "peak":  f["peak"],
                     "rms":   f["rms"],
                     "p2p":   f["p2p"],
                     "zcr":   float(f["zcr"]),
@@ -112,7 +113,7 @@ def train_tree(rows):
     from sklearn.model_selection import StratifiedKFold, cross_val_score
     from sklearn.metrics import classification_report, confusion_matrix
 
-    FEATURES = ["std", "rms", "p2p", "zcr", "speed"]
+    FEATURES = ["std", "peak", "rms", "p2p", "zcr", "speed"]
     X = np.array([[r[f] for f in FEATURES] for r in rows], dtype=np.float32)
     y_str = [r["label"] for r in rows]
     label_to_idx = {c: i for i, c in enumerate(TERRAIN_CLASSES)}
@@ -136,7 +137,7 @@ def tree_to_cpp(clf, indent="    "):
     from sklearn.tree import _tree
 
     tree_ = clf.tree_
-    feat_names  = ["feat_std", "feat_rms", "feat_p2p", "feat_zcr", "feat_speed"]
+    feat_names  = ["feat_std", "feat_peak", "feat_rms", "feat_p2p", "feat_zcr", "feat_speed"]
     class_names = TERRAIN_CLASSES
     lines = []
 
@@ -230,17 +231,18 @@ def write_header(clf, score_mean, score_std, n_samples,
         "    float   turnGain;\n"
         "};\n"
         "\n"
-        "// Ordered alphabetically: carpet, gravel, mat, tile\n"
+        "// Ordered alphabetically: carpet, gravel, pavement, tile\n"
         "static const TerrainProfile TERRAIN_PROFILES[] = {\n"
         "    {170, 0.40f, 0.80f},  // carpet\n"
         "    {130, 0.60f, 0.60f},  // gravel\n"
-        "    {190, 0.30f, 0.90f},  // mat\n"
+        "    {190, 0.30f, 0.90f},  // pavement\n"
         "    {220, 0.20f, 1.00f},  // tile\n"
         "};\n"
-        'static const char* TERRAIN_NAMES[] = {"carpet", "gravel", "mat", "tile"};\n'
+        'static const char* TERRAIN_NAMES[] = {"carpet", "gravel", "pavement", "tile"};\n'
         "\n"
         "// -- Extern declarations (defined in rover_firmware.ino) ------------\n"
         "extern float feat_std;\n"
+        "extern float feat_peak;\n"
         "extern float feat_rms;\n"
         "extern float feat_p2p;\n"
         "extern float feat_zcr;\n"
@@ -309,7 +311,7 @@ def main():
     rows, speed_map = generate_dataset()
     print(f"      Total windows: {len(rows)}")
 
-    FIELDS = ["std", "rms", "p2p", "zcr", "speed", "pwm", "label"]
+    FIELDS = ["std", "peak", "rms", "p2p", "zcr", "speed", "pwm", "label"]
     with open(OUT_CSV, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()

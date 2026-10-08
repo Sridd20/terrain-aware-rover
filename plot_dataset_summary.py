@@ -35,11 +35,11 @@ with open("ml_dataset.csv", newline="") as f:
 # --------------------------------------------------------------------------
 # Compute per-terrain stats
 # --------------------------------------------------------------------------
-TERRAIN_ORDER  = ["tile", "mat", "carpet", "gravel"]
-TERRAIN_LABELS = ["Tile", "Mat", "Carpet", "Gravel"]
+TERRAIN_ORDER  = ["tile", "pavement", "carpet", "gravel"]
+TERRAIN_LABELS = ["Tile", "pavement", "Carpet", "Gravel"]
 COLORS = {
     "tile":   "#26BFFF",
-    "mat":    "#33CC4D",
+    "pavement":    "#33CC4D",
     "carpet": "#FFB31A",
     "gravel": "#E63333",
 }

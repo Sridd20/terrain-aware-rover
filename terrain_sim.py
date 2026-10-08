@@ -38,12 +38,12 @@ PHYSICS_DT = 0.002  # MuJoCo integration timestep (s)
 # ----------------------------------------------------------------------
 # Each terrain is a band-limited noise heightfield: center_freq controls the
 # "grain size" of the bumps (cycles across the whole field), elev_m controls
-# their height in meters. carpet/mat are deliberately close (doc calls that
+# their height in meters. carpet/pavement are deliberately close (doc calls that
 # pair "the most confusable"); gravel is high-frequency and tall; tile is
 # almost flat.
 TERRAIN_PARAMS = {
     "tile":   dict(center_freq=0.010, bandwidth=0.008, elev_m=0.0004, seed=1),
-    "mat":    dict(center_freq=0.045, bandwidth=0.020, elev_m=0.0020, seed=2),
+    "pavement":    dict(center_freq=0.045, bandwidth=0.020, elev_m=0.0020, seed=2),
     "carpet": dict(center_freq=0.038, bandwidth=0.018, elev_m=0.0026, seed=3),
     "gravel": dict(center_freq=0.130, bandwidth=0.060, elev_m=0.0080, seed=4),
 }
@@ -57,7 +57,7 @@ HF_SIZE_Y = 0.8   # half-extent, meters -> field spans 1.6m across
 # around the nominal per-terrain PWM from Table 7.
 PWM_LEVELS = {
     "tile":   [180, 220, 255],
-    "mat":    [150, 190, 230],
+    "pavement":    [150, 190, 230],
     "carpet": [135, 170, 205],
     "gravel": [100, 130, 165],
 }
@@ -69,7 +69,7 @@ PWM_TO_OMEGA = 15.0 / 255.0  # rad/s per PWM unit (wheel radius 0.035m -> ~0.9 m
 # ----------------------------------------------------------------------
 ADAPTIVE_POLICY = {
     "tile":   (0.55, 0.08),
-    "mat":    (0.40, 0.06),
+    "pavement":    (0.40, 0.06),
     "carpet": (0.28, 0.05),
     "gravel": (0.18, 0.04),
 }
@@ -80,24 +80,24 @@ ADAPTIVE_POLICY = {
 TRANSITION_RAMP = {
     ("tile",   "gravel"): dict(ramp_rate=0.04, hold=4),  # sudden rough — brake hard
     ("tile",   "carpet"): dict(ramp_rate=0.08, hold=3),  # moderate softening
-    ("tile",   "mat"):    dict(ramp_rate=0.10, hold=2),  # subtle — quick ramp
-    ("mat",    "gravel"): dict(ramp_rate=0.05, hold=4),  # rough incoming — brake firmly
-    ("mat",    "carpet"): dict(ramp_rate=0.09, hold=2),  # near-similar — gentle
-    ("mat",    "tile"):   dict(ramp_rate=0.12, hold=2),  # smoother — ease up
+    ("tile",   "pavement"):    dict(ramp_rate=0.10, hold=2),  # subtle — quick ramp
+    ("pavement",    "gravel"): dict(ramp_rate=0.05, hold=4),  # rough incoming — brake firmly
+    ("pavement",    "carpet"): dict(ramp_rate=0.09, hold=2),  # near-similar — gentle
+    ("pavement",    "tile"):   dict(ramp_rate=0.12, hold=2),  # smoother — ease up
     ("carpet", "gravel"): dict(ramp_rate=0.05, hold=4),  # big jump in roughness
-    ("carpet", "mat"):    dict(ramp_rate=0.10, hold=2),  # slight improvement
+    ("carpet", "pavement"):    dict(ramp_rate=0.10, hold=2),  # slight improvement
     ("carpet", "tile"):   dict(ramp_rate=0.14, hold=1),  # much smoother — accelerate freely
     ("gravel", "carpet"): dict(ramp_rate=0.08, hold=3),  # some improvement — ramp up gently
-    ("gravel", "mat"):    dict(ramp_rate=0.10, hold=2),  # clear improvement
+    ("gravel", "pavement"):    dict(ramp_rate=0.10, hold=2),  # clear improvement
     ("gravel", "tile"):   dict(ramp_rate=0.15, hold=1),  # suddenly smooth — quick ramp
 }
 
 # Rolling RMS thresholds (gravity-bias-removed Z accel, m/s²) for blind classification.
 # Boundaries are midpoints between adjacent class means from dataset_summary.csv,
-# sorted by ascending vibration intensity: carpet(0.255) < mat(0.291) < tile(0.416) < gravel(0.477).
+# sorted by ascending vibration intensity: carpet(0.255) < pavement(0.291) < tile(0.416) < gravel(0.477).
 RMS_THRESHOLDS = [
-    (0.273, "carpet"),   # midpoint(carpet=0.255, mat=0.291)
-    (0.354, "mat"),      # midpoint(mat=0.291,  tile=0.416)
+    (0.273, "carpet"),   # midpoint(carpet=0.255, pavement=0.291)
+    (0.354, "pavement"),      # midpoint(pavement=0.291,  tile=0.416)
     (0.447, "tile"),     # midpoint(tile=0.416, gravel=0.477)
     (float("inf"), "gravel"),
 ]
@@ -105,7 +105,7 @@ RMS_THRESHOLDS = [
 # Chassis RGBA colours per terrain label (shown live in the MuJoCo viewer)
 TERRAIN_COLORS = {
     "tile":   [0.15, 0.75, 1.00, 1.0],   # cyan-blue  — fast, smooth
-    "mat":    [0.20, 0.80, 0.30, 1.0],   # green      — moderate
+    "pavement":    [0.20, 0.80, 0.30, 1.0],   # green      — moderate
     "carpet": [1.00, 0.70, 0.10, 1.0],   # amber      — cautious
     "gravel": [0.90, 0.20, 0.20, 1.0],   # red        — slow, rough
 }
@@ -441,7 +441,7 @@ class AdaptiveController:
       1. Computes a rolling RMS of the gravity-bias-removed Z accelerometer signal
          sampled at SR=100 Hz (matching the dataset pipeline exactly)
       2. Low-pass smooths to suppress transition spikes
-      3. Classifies terrain from RMS alone (tile / mat / carpet / gravel)
+      3. Classifies terrain from RMS alone (tile / pavement / carpet / gravel)
       4. Applies the matching speed + motor-gain from ADAPTIVE_POLICY
 
     The controller is entirely blind — it never receives the terrain label.
@@ -676,7 +676,7 @@ def view_mixed_terrain(seed=None, n_segments=6, sim_speed=1, manual=False, slowd
         print(f"Controller: BLIND (IMU only)  |  Looping: yes  |  Speed: {sim_speed}x\n")
 
     # ANSI colours for terminal label display
-    _CLR = {"tile": "\033[96m", "mat": "\033[92m",
+    _CLR = {"tile": "\033[96m", "pavement": "\033[92m",
             "carpet": "\033[93m", "gravel": "\033[91m"}
     _RST = "\033[0m"
     _frame = 0

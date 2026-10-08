@@ -31,7 +31,7 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
     --text:      #e6edf3;
     --muted:     #8b949e;
     --tile-c:    #58a6ff;
-    --mat-c:     #a371f7;
+    --pavement-c:     #a371f7;
     --carpet-c:  #3fb950;
     --gravel-c:  #d29922;
     --radius:    10px;
@@ -160,11 +160,11 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
     transition: opacity .2s;
   }
   .terrain-btn[data-t="tile"]   { border-color: #1a3a5e; }
-  .terrain-btn[data-t="mat"]    { border-color: #2d1f4e; }
+  .terrain-btn[data-t="pavement"]    { border-color: #2d1f4e; }
   .terrain-btn[data-t="carpet"] { border-color: #1a3a28; }
   .terrain-btn[data-t="gravel"] { border-color: #3a2d0d; }
   .terrain-btn[data-t="tile"].selected   { border-color: var(--tile-c);   color: var(--tile-c);   background: rgba(88,166,255,.12); }
-  .terrain-btn[data-t="mat"].selected    { border-color: var(--mat-c);    color: var(--mat-c);    background: rgba(163,113,247,.12); }
+  .terrain-btn[data-t="pavement"].selected    { border-color: var(--pavement-c);    color: var(--pavement-c);    background: rgba(163,113,247,.12); }
   .terrain-btn[data-t="carpet"].selected { border-color: var(--carpet-c); color: var(--carpet-c); background: rgba(63,185,80,.12); }
   .terrain-btn[data-t="gravel"].selected { border-color: var(--gravel-c); color: var(--gravel-c); background: rgba(210,153,34,.12); }
   .terrain-btn .t-icon { font-size: 1.4rem; display: block; margin-bottom: 4px; }
@@ -182,7 +182,7 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
     transition: color .3s;
   }
   .pred-value[data-t="tile"]   { color: var(--tile-c); }
-  .pred-value[data-t="mat"]    { color: var(--mat-c); }
+  .pred-value[data-t="pavement"]    { color: var(--pavement-c); }
   .pred-value[data-t="carpet"] { color: var(--carpet-c); }
   .pred-value[data-t="gravel"] { color: var(--gravel-c); }
 
@@ -435,8 +435,8 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
         <button class="terrain-btn selected" data-t="tile"   onclick="setLabel('tile')">
           <span class="t-icon">🪨</span>TILE
         </button>
-        <button class="terrain-btn" data-t="mat"    onclick="setLabel('mat')">
-          <span class="t-icon">🟫</span>MAT
+        <button class="terrain-btn" data-t="pavement"    onclick="setLabel('pavement')">
+          <span class="t-icon">🟫</span>PAVEMENT
         </button>
         <button class="terrain-btn" data-t="carpet" onclick="setLabel('carpet')">
           <span class="t-icon">🧶</span>CARPET
@@ -557,8 +557,8 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
           <button class="terrain-btn" data-t="tile"   onclick="sendCorrection('tile')">
             <span class="t-icon">🪨</span>TILE
           </button>
-          <button class="terrain-btn" data-t="mat"    onclick="sendCorrection('mat')">
-            <span class="t-icon">🟫</span>MAT
+          <button class="terrain-btn" data-t="pavement"    onclick="sendCorrection('pavement')">
+            <span class="t-icon">🟫</span>PAVEMENT
           </button>
           <button class="terrain-btn" data-t="carpet" onclick="sendCorrection('carpet')">
             <span class="t-icon">🧶</span>CARPET

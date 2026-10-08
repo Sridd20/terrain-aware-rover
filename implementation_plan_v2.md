@@ -145,7 +145,7 @@ The OLED **shares the same I²C bus** as the MPU6050 (different addresses: OLED 
 **Purpose:** Collect labelled ground-truth data to build and improve the ML classifier.
 
 **How it works:**
-- The user selects the current terrain surface (Tile / Mat / Carpet / Gravel) via the WiFi dashboard or Serial command
+- The user selects the current terrain surface (Tile / Pavement / Carpet / Gravel) via the WiFi dashboard or Serial command
 - The rover drives forward; the firmware tags every feature window with the selected label
 - Every labelled row is appended to `train_dataset.csv` on the PC (via Serial logger) and/or stored in a browser-downloadable session CSV on the dashboard
 - The OLED shows `[TRAIN]` mode indicator and the currently selected terrain in large text
@@ -177,15 +177,15 @@ PC logger appends row to train_dataset.csv
 
 **Data flow:**
 ```
-ESP32 classifier predicts "mat"
+ESP32 classifier predicts "pavement"
        ↓
-OLED shows:  Predicted: MAT  [YES?] [NO?]
+OLED shows:  Predicted: pavement  [YES?] [NO?]
 Dashboard shows same + big YES / NO buttons
        ↓
 User taps NO → taps CARPET (the real terrain)
        ↓
-Serial:  std,rms,p2p,zcr,speed,pwm,predicted=mat,actual=carpet,correct=0
-WS:      {"mode":"test","predicted":"mat","actual":"carpet","correct":false}
+Serial:  std,rms,p2p,zcr,speed,pwm,predicted=pavement,actual=carpet,correct=0
+WS:      {"mode":"test","predicted":"pavement","actual":"carpet","correct":false}
        ↓
 PC logger appends to feedback_log.csv
 ```
@@ -207,7 +207,7 @@ enum Mode { TRAINING, TESTING };
 Mode currentMode = TRAINING;
 
 // Labels
-const char* TERRAINS[] = {"tile", "mat", "carpet", "gravel"};
+const char* TERRAINS[] = {"tile", "pavement", "carpet", "gravel"};
 String actualLabel    = "tile";   // user-selected (Training) or user-corrected (Testing)
 String predictedLabel = "";       // classifier output (Testing only)
 bool   feedbackGiven  = false;    // has user pressed YES or NO this window?
@@ -306,7 +306,7 @@ String classify() {
     if (feat_std < 0.05)  return "tile";
     if (feat_p2p > 0.8)   return "gravel";
     if (feat_zcr > 45)    return "carpet";
-    return "mat";
+    return "pavement";
 }
 ```
 
@@ -417,7 +417,7 @@ HTML/CSS/JS embedded as a C string, served at `http://192.168.4.1`.
 │                                                  │
 │  ┌─── SELECT TERRAIN SURFACE ─────────────────┐ │
 │  │                                             │ │
-│  │   [ 🪨 TILE ]   [ 🟫 MAT ]                  │ │
+│  │   [ 🪨 TILE ]   [ 🟫 pavement ]                  │ │
 │  │   [ 🧶 CARPET ] [ ⚫ GRAVEL ]               │ │
 │  │                                             │ │
 │  │   Active: ● CARPET  (tap to change)         │ │
@@ -475,7 +475,7 @@ HTML/CSS/JS embedded as a C string, served at `http://192.168.4.1`.
 │                                                  │
 │  ┌─── CORRECTION (shown only after NO) ───────┐  │
 │  │  What was the actual terrain?               │  │
-│  │   [ 🪨 TILE ]   [ 🟫 MAT ]                  │  │
+│  │   [ 🪨 TILE ]   [ 🟫 pavement ]                  │  │
 │  │   [ 🧶 CARPET ] [ ⚫ GRAVEL ]               │  │
 │  └────────────────────────────────────────────┘  │
 │                                                  │
