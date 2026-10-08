@@ -7,8 +7,8 @@ Reads Serial output from the ESP32 at 115200 baud and routes:
   TEST  rows  →  feedback_log.csv
 
 Serial line formats (produced by rover_firmware.ino):
-  TRAIN,std,rms,p2p,zcr,speed,pwm,label,timestamp_ms
-  TEST,std,rms,p2p,zcr,speed,pwm,predicted,actual,correct,timestamp_ms
+  TRAIN,std,peak,rms,p2p,zcr,speed,pwm,label,timestamp_ms
+  TEST,std,peak,rms,p2p,zcr,speed,pwm,predicted,actual,correct,timestamp_ms
 
 Usage:
   python collect_data.py --port COM5
@@ -44,8 +44,8 @@ except ImportError:
     sys.exit(1)
 
 # ─── CSV column headers ────────────────────────────────────────────────────────
-TRAIN_HEADER    = ["std", "rms", "p2p", "zcr", "speed", "pwm", "label", "timestamp_ms"]
-FEEDBACK_HEADER = ["std", "rms", "p2p", "zcr", "speed", "pwm",
+TRAIN_HEADER    = ["std", "peak", "rms", "p2p", "zcr", "speed", "pwm", "label", "timestamp_ms"]
+FEEDBACK_HEADER = ["std", "peak", "rms", "p2p", "zcr", "speed", "pwm",
                    "predicted", "actual", "correct", "timestamp_ms"]
 
 # ─── In-memory buffers ─────────────────────────────────────────────────────────
@@ -103,16 +103,16 @@ def save_csv(path: Path, header: list, rows: list):
 def handle_train_row(parts: list):
     """Parse and store a TRAIN CSV line."""
     global recording
-    # TRAIN,std,rms,p2p,zcr,speed,pwm,label,timestamp_ms
-    if len(parts) < 9:
+    # TRAIN,std,peak,rms,p2p,zcr,speed,pwm,label,timestamp_ms
+    if len(parts) < 10:
         return
-    _, std, rms, p2p, zcr, speed, pwm, label, ts = parts[:9]
-    row = [std, rms, p2p, zcr, speed, pwm, label.strip(), ts.strip()]
+    _, std, peak, rms, p2p, zcr, speed, pwm, label, ts = parts[:10]
+    row = [std, peak, rms, p2p, zcr, speed, pwm, label.strip(), ts.strip()]
 
     if recording:
         train_rows.append(row)
         stats["train_total"] += 1
-        print(f"  [TRAIN] label={label.strip():8s}  std={std}  rms={rms}  p2p={p2p}  "
+        print(f"  [TRAIN] label={label.strip():8s}  std={std}  peak={peak}  rms={rms}  p2p={p2p}  "
               f"zcr={zcr}  spd={speed}  pwm={pwm}  "
               f"  total={stats['train_total']}")
 
@@ -120,11 +120,11 @@ def handle_train_row(parts: list):
 def handle_test_row(parts: list):
     """Parse and store a TEST CSV line."""
     global recording
-    # TEST,std,rms,p2p,zcr,speed,pwm,predicted,actual,correct,timestamp_ms
-    if len(parts) < 11:
+    # TEST,std,peak,rms,p2p,zcr,speed,pwm,predicted,actual,correct,timestamp_ms
+    if len(parts) < 12:
         return
-    _, std, rms, p2p, zcr, speed, pwm, predicted, actual, correct, ts = parts[:11]
-    row = [std, rms, p2p, zcr, speed, pwm,
+    _, std, peak, rms, p2p, zcr, speed, pwm, predicted, actual, correct, ts = parts[:12]
+    row = [std, peak, rms, p2p, zcr, speed, pwm,
            predicted.strip(), actual.strip(), correct.strip(), ts.strip()]
 
     if recording:

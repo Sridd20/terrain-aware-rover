@@ -47,6 +47,7 @@ static const char* TERRAIN_NAMES[] = {"carpet", "gravel", "pavement", "tile"};
 
 // -- Extern declarations (defined in rover_firmware.ino) ------------
 extern float feat_std;
+extern float feat_peak;
 extern float feat_rms;
 extern float feat_p2p;
 extern float feat_zcr;

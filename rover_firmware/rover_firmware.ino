@@ -73,8 +73,9 @@ const char* AP_PASSWORD = "rover1234";
 // prevents the 5 V rail from collapsing enough to brown-out the ESP32 at
 // motor startup.  Hardware fix: also add:
 //   • 470–1000 µF electrolytic cap across L298N 12 V / VCC–GND input
-//   • 100–220 µF electrolytic cap across buck-converter 5 V / GND output
+//   • 100–220 µF electrolytic cap across L298N 5 V output / GND,
 //     placed as close as possible to the ESP32 VIN / GND pins.
+//   (No buck converter — ESP32 is powered directly from L298N 5 V regulator.)
 #define RAMP_STEPS    15
 #define RAMP_STEP_MS  10
 
@@ -125,6 +126,7 @@ int   sampleCount = 0;
 // Features — updated every WIN_SIZE samples
 // ═══════════════════════════════════════════════════════════════════════════════
 float feat_std   = 0.0f;
+float feat_peak  = 0.0f;   // crest factor = max|x| / rms
 float feat_rms   = 0.0f;
 float feat_p2p   = 0.0f;
 float feat_zcr   = 0.0f;
@@ -171,10 +173,11 @@ void initMPU6050() {
     Wire.write(0x00);  // clear sleep bit
     Wire.endTransmission(true);
 
-    // Set accelerometer range to ±4g (AFS_SEL = 1)
+    // Set accelerometer range to ±8g (AFS_SEL = 2)
+    // Gravel vibration clips at ±4g — doubled to ±8g so p2p and std are real.
     Wire.beginTransmission(MPU_ADDR);
     Wire.write(0x1C);  // ACCEL_CONFIG
-    Wire.write(0x08);  // AFS_SEL = 1 → ±4g, LSB = 8192
+    Wire.write(0x10);  // AFS_SEL = 2 → ±8g, LSB = 4096
     Wire.endTransmission(true);
 
     // Set DLPF to ~94 Hz bandwidth (CONFIG register)
@@ -196,7 +199,7 @@ float readAccelZ() {
     Wire.endTransmission(false);
     Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)2, (uint8_t)true);
     int16_t raw = ((int16_t)Wire.read() << 8) | Wire.read();
-    float g = raw / 8192.0f;  // ±4g range
+    float g = raw / 4096.0f;  // ±8g range
     return g - 1.0f;           // remove 1g gravity bias (sensor faces up)
 }
 
@@ -209,6 +212,7 @@ void computeFeatures() {
     float sumSq = 0.0f;
     float minV  = accelBuf[0];
     float maxV  = accelBuf[0];
+    float maxAbs = 0.0f;
     int   zcr   = 0;
 
     for (int i = 0; i < WIN_SIZE; i++) {
@@ -216,12 +220,15 @@ void computeFeatures() {
         sumSq += accelBuf[i] * accelBuf[i];
         if (accelBuf[i] < minV) minV = accelBuf[i];
         if (accelBuf[i] > maxV) maxV = accelBuf[i];
+        float absV = fabsf(accelBuf[i]);
+        if (absV > maxAbs) maxAbs = absV;
         if (i > 0 && accelBuf[i-1] * accelBuf[i] < 0.0f) zcr++;
     }
 
     float mean = sum / (float)WIN_SIZE;
     feat_std   = sqrtf((sumSq / (float)WIN_SIZE) - (mean * mean));
     feat_rms   = sqrtf(sumSq / (float)WIN_SIZE);
+    feat_peak  = (feat_rms > 1e-6f) ? (maxAbs / feat_rms) : 0.0f;  // crest factor
     feat_p2p   = maxV - minV;
     feat_zcr   = (float)zcr;
     // MuJoCo-calibrated: speed_ms = PWM_SPEED_SLOPE * pwm + PWM_SPEED_INTERCEPT
@@ -379,17 +386,19 @@ void stopMotors() {
 // Serial row output
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// TRAIN row: TRAIN,std,rms,p2p,zcr,speed,pwm,label,timestamp_ms
-// TEST  row: TEST,std,rms,p2p,zcr,speed,pwm,predicted,actual,correct,timestamp_ms
+// TRAIN row: TRAIN,std,peak,rms,p2p,zcr,speed,pwm,label,timestamp_ms
+// TEST  row: TEST,std,peak,rms,p2p,zcr,speed,pwm,predicted,actual,correct,timestamp_ms
 //
 void printSerialRow() {
     if (currentMode == TRAINING) {
-        Serial.printf("TRAIN,%.4f,%.4f,%.4f,%.0f,%.4f,%d,%s,%lu\n",
-            feat_std, feat_rms, feat_p2p, feat_zcr, feat_speed,
+        // TRAIN,std,peak,rms,p2p,zcr,speed,pwm,label,timestamp_ms
+        Serial.printf("TRAIN,%.4f,%.4f,%.4f,%.4f,%.0f,%.4f,%d,%s,%lu\n",
+            feat_std, feat_peak, feat_rms, feat_p2p, feat_zcr, feat_speed,
             currentPwm, actualLabel.c_str(), millis());
     } else {
-        Serial.printf("TEST,%.4f,%.4f,%.4f,%.0f,%.4f,%d,%s,%s,%d,%lu\n",
-            feat_std, feat_rms, feat_p2p, feat_zcr, feat_speed,
+        // TEST,std,peak,rms,p2p,zcr,speed,pwm,predicted,actual,correct,timestamp_ms
+        Serial.printf("TEST,%.4f,%.4f,%.4f,%.4f,%.0f,%.4f,%d,%s,%s,%d,%lu\n",
+            feat_std, feat_peak, feat_rms, feat_p2p, feat_zcr, feat_speed,
             currentPwm,
             predictedLabel.c_str(),
             actualLabel.c_str(),
@@ -406,6 +415,7 @@ void broadcastState() {
     StaticJsonDocument<512> doc;
     doc["mode"]           = (currentMode == TRAINING) ? "train" : "test";
     doc["std"]            = feat_std;
+    doc["peak"]           = feat_peak;
     doc["rms"]            = feat_rms;
     doc["p2p"]            = feat_p2p;
     doc["zcr"]            = feat_zcr;

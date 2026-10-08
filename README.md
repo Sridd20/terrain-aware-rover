@@ -5,7 +5,7 @@ An ESP32-based rover that classifies the surface it's driving on — **tile, pav
 ```
 MPU6050 (100 Hz IMU)
     → 1s windowed accel signal (z-axis, gravity-removed)
-    → 5-D feature vector: std, rms, p2p, zcr, speed
+    → 6-D feature vector: std, peak, rms, p2p, zcr, speed
     → on-device decision tree classifier  (terrain_classifier.h)
     → terrain label: tile / pavement / carpet / gravel
     → adaptive PWM + transition-pair ramp control
@@ -34,18 +34,20 @@ Different surfaces have very different traction properties. A rover running at f
 | Motor driver | L298N dual H-bridge | ENA/ENB jumpers **must be removed** for PWM speed control |
 | Motors | 2× yellow TT DC motors | Rear-left (ch A) + Rear-right (ch B); front caster is passive |
 | Display | SSD1306 0.96″ OLED (128×64) | I²C addr 0x3C, shared SDA/SCL bus with MPU6050 |
-| Power | 3S 18650 Li-ion (11.1 V) + 3S BMS | Motor supply; buck converter 5 V → ESP32 VIN |
+| Power | 3S 18650 Li-ion (11.1 V) + 3S BMS | Drives motors via L298N; L298N 5 V output → ESP32 VIN (no buck converter — see capacitor note below) |
 
 > **Mounting critical:** bolt the MPU6050 directly to the chassis frame, near a wheel mount — not on foam or a loose breadboard. Soft mounting low-pass-filters the vibration signal and kills classification accuracy.
 
 ### Power Supply — Required Decoupling Capacitors
 
-The ESP32 reboots (brown-out reset) the moment a motor command is sent because motor startup inrush current causes a brief voltage dip on the supply rail.  Two capacitors are **required** to stabilise both rails:
+The ESP32 reboots (brown-out reset) the moment a motor command is sent because motor startup inrush current causes a brief voltage dip on the supply rail.  A capacitor is **required** to stabilise the 5 V rail:
 
 | Location | Capacitor | Polarity | Purpose |
 |----------|-----------|----------|---------|
-| L298N `12V / VCC` → `GND` terminals | **470–1000 µF** electrolytic, ≥ 16 V | + to VCC, − to GND | Absorbs motor inrush current; prevents voltage collapse on the 12 V motor rail |
-| Buck converter `5V out` → `GND`, as close to ESP32 `VIN`/`GND` as possible | **100–220 µF** electrolytic, ≥ 10 V | + to 5 V, − to GND | Keeps the 5 V rail stable during motor startup so ESP32 does not brown-out |
+| L298N `12V / VCC` → `GND` terminals | **470–1000 µF** electrolytic, ≥ 16 V | + to VCC, − to GND | Absorbs motor inrush current; prevents voltage collapse on the motor rail |
+| L298N `5V out` → `GND`, **as close to ESP32 `VIN`/`GND` as possible** | **100–220 µF** electrolytic, ≥ 10 V | + to 5 V, − to GND | Keeps the 5 V rail stable during motor startup so ESP32 does not brown-out |
+
+> **No buck converter is used.** The L298N's onboard 5 V regulator (enabled when its 5 V Enable jumper is in place) supplies the ESP32 directly.  The 100–220 µF cap on the 5 V output is the only additional component needed.
 
 **Placement rules:**
 - Solder the caps directly across the screw terminals / power pads — not at the end of long wires.
@@ -53,9 +55,9 @@ The ESP32 reboots (brown-out reset) the moment a motor command is sent because m
 - A small 100 nF ceramic cap in parallel with each electrolytic (same pads) helps filter high-frequency switching noise from the L298N.
 
 **Firmware soft-start (complementary fix):**  
-The firmware also ramps motor PWM from 0 → target over 150 ms (`RAMP_STEPS = 15 × RAMP_STEP_MS = 10 ms`) whenever a `go`, `back`, `turn`, or `spin` command is received.  This reduces the inrush spike magnitude even before the caps have time to respond, and makes the cap requirement less critical.
+The firmware also ramps motor PWM from 0 → target over 150 ms (`RAMP_STEPS = 15 × RAMP_STEP_MS = 10 ms`) whenever a `go`, `back`, `turn`, or `spin` command is received.  This reduces the inrush spike magnitude even before the cap has time to respond, and makes the cap requirement less critical.
 
-> **Diagnosis:** if the ESP32 still reboots after adding caps, open the Serial Monitor — a brown-out will print `rst:0xc (SW_CPU_RESET)` or `rst:0x10 (RTCWDT_RTC_RESET)` in the boot log.  Increase cap value or reduce the default `currentPwm` starting value.
+> **Diagnosis:** if the ESP32 still reboots after adding the cap, open the Serial Monitor — a brown-out will print `rst:0xc (SW_CPU_RESET)` or `rst:0x10 (RTCWDT_RTC_RESET)` in the boot log.  Increase cap value or reduce the default `currentPwm` starting value.
 
 ### Pin Map
 
@@ -108,7 +110,7 @@ Open the URL from any phone or PC browser. The dashboard provides:
 - **Terrain selector** (Training mode) — large buttons for Tile / Pavement / Carpet / Gravel
 - **Classification result** (Testing mode) — Predicted vs Actual with ✓/✗ match indicator and confidence bar
 - **Motor controls** — PWM slider (0–255), GO / STOP buttons
-- **Live vibration gauges** — std, rms, p2p, zcr, speed updated every second via WebSocket
+- **Live vibration gauges** — std, peak, rms, p2p, zcr, speed updated every second via WebSocket
 - **Data logging** — REC / STOP, sample counter, Download CSV button
 
 ---
@@ -300,12 +302,12 @@ This breaks at higher speeds — **tile driven fast** produces RMS values that o
 
 ### Solution: Decision tree on Speed + Vibration
 
-Adding **rover speed (m/s)** as a 5th feature alongside std, rms, p2p, zcr cleanly separates all four terrain classes. The classifier is a depth-5 decision tree exported to pure C++ — no ML library needed on the ESP32.
+Adding **rover speed (m/s)** as a 6th feature alongside std, peak, rms, p2p, zcr cleanly separates all four terrain classes. The classifier is a depth-5 decision tree exported to pure C++ — no ML library needed on the ESP32.
 
 ```
 5-fold CV accuracy:  77.1% ± 11.2%  (340-sample simulation dataset)
 Training set accuracy: 81.2%
-Feature importances: speed > std > rms > p2p > zcr
+Feature importances: speed > peak > std > rms > p2p > zcr
 ```
 
 **Per-class results (training set):**
@@ -333,8 +335,7 @@ This calibration is embedded in `terrain_classifier.h` as `PWM_SPEED_SLOPE` and 
 
 ## Key Constants
 
-| Constant | Value | Location |
-|----------|-------|----------|
+| IMU accel range | ±8 g (AFS_SEL = 2) | Firmware — prevents gravel clipping |
 | Sample rate | 100 Hz | Firmware loop |
 | Window size | 100 samples (1 s) | Feature extraction |
 | Hold windows | 1–4 (per terrain pair) | Transition ramp table |
@@ -343,7 +344,8 @@ This calibration is embedded in `terrain_classifier.h` as `PWM_SPEED_SLOPE` and 
 | WiFi AP IP | 192.168.4.1 | WebServer |
 | WebSocket port | 81 | WebSocketsServer |
 | Serial baud | 115200 | USB Serial |
-| Motor supply | 7–12 V (3S Li-ion recommended) | Battery |
+| Motor supply | 7–12 V (3S Li-ion recommended) | Battery → L298N |
+| 5 V supply | L298N onboard regulator → ESP32 VIN (no buck converter) | Decoupled with 100–220 µF cap |
 | PWM→speed slope | 0.001471 m/s per PWM unit | terrain_classifier.h |
 | PWM→speed intercept | −0.000265 m/s | terrain_classifier.h |
 

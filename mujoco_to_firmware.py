@@ -91,6 +91,7 @@ def generate_dataset():
                 f = sim.extract_features(w)
                 rows.append({
                     "std":   f["std"],
+                    "peak":  f["peak"],
                     "rms":   f["rms"],
                     "p2p":   f["p2p"],
                     "zcr":   float(f["zcr"]),
@@ -112,7 +113,7 @@ def train_tree(rows):
     from sklearn.model_selection import StratifiedKFold, cross_val_score
     from sklearn.metrics import classification_report, confusion_matrix
 
-    FEATURES = ["std", "rms", "p2p", "zcr", "speed"]
+    FEATURES = ["std", "peak", "rms", "p2p", "zcr", "speed"]
     X = np.array([[r[f] for f in FEATURES] for r in rows], dtype=np.float32)
     y_str = [r["label"] for r in rows]
     label_to_idx = {c: i for i, c in enumerate(TERRAIN_CLASSES)}
@@ -136,7 +137,7 @@ def tree_to_cpp(clf, indent="    "):
     from sklearn.tree import _tree
 
     tree_ = clf.tree_
-    feat_names  = ["feat_std", "feat_rms", "feat_p2p", "feat_zcr", "feat_speed"]
+    feat_names  = ["feat_std", "feat_peak", "feat_rms", "feat_p2p", "feat_zcr", "feat_speed"]
     class_names = TERRAIN_CLASSES
     lines = []
 
@@ -241,6 +242,7 @@ def write_header(clf, score_mean, score_std, n_samples,
         "\n"
         "// -- Extern declarations (defined in rover_firmware.ino) ------------\n"
         "extern float feat_std;\n"
+        "extern float feat_peak;\n"
         "extern float feat_rms;\n"
         "extern float feat_p2p;\n"
         "extern float feat_zcr;\n"
@@ -309,7 +311,7 @@ def main():
     rows, speed_map = generate_dataset()
     print(f"      Total windows: {len(rows)}")
 
-    FIELDS = ["std", "rms", "p2p", "zcr", "speed", "pwm", "label"]
+    FIELDS = ["std", "peak", "rms", "p2p", "zcr", "speed", "pwm", "label"]
     with open(OUT_CSV, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()
