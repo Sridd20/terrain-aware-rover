@@ -25,13 +25,13 @@ WHEEL_RADIUS  = 0.035           # meters
 # Terrain colors (matching TERRAIN_COLORS in terrain_sim.py, normalised to [0,1])
 COLORS = {
     "tile":   "#26BFFF",   # cyan-blue
-    "mat":    "#33CC4D",   # green
+    "pavement":    "#33CC4D",   # green
     "carpet": "#FFB31A",   # amber
     "gravel": "#E63333",   # red
 }
 MARKERS = {
     "tile":   "o",
-    "mat":    "s",
+    "pavement":    "s",
     "carpet": "^",
     "gravel": "D",
 }
@@ -59,7 +59,7 @@ fig, ax = plt.subplots(figsize=(9, 6))
 fig.patch.set_facecolor("#0F1117")
 ax.set_facecolor("#1A1D27")
 
-terrains = ["tile", "mat", "carpet", "gravel"]
+terrains = ["tile", "pavement", "carpet", "gravel"]
 
 for terrain in terrains:
     pts = [r for r in rows if r["label"] == terrain]
@@ -79,7 +79,7 @@ for terrain in terrains:
 
 # RMS threshold lines (current classifier's decision boundaries on X axis)
 threshold_rms = [0.10, 0.25, 0.55]
-labels_thresh = ["tile|mat", "mat|carpet", "carpet|gravel"]
+labels_thresh = ["tile|pavement", "pavement|carpet", "carpet|gravel"]
 for xv, lbl in zip(threshold_rms, labels_thresh):
     ax.axvline(x=xv, color="white", linewidth=0.8, linestyle="--", alpha=0.35)
     ax.text(xv + 0.005, ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 0.8,

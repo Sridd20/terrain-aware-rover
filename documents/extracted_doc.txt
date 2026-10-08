@@ -121,7 +121,7 @@ The trained scikit-learn decision tree is exported to a C++ header (see Section 
 #include "terrain_classifier.h"
 Eloquent::ML::Port::DecisionTree clf;
  
-const char* label = clf.predictLabel(features);   // "tile" | "mat" | "carpet" | "gravel"
+const char* label = clf.predictLabel(features);   // "tile" | "pavement" | "carpet" | "gravel"
 Do not hand-edit this header. Regenerate it whenever the model is retrained (Section 5.4).
 3.4 Smoothing (majority vote)
 const int VOTE_WINDOW = 5;
@@ -142,7 +142,7 @@ Tile
 220
 0.2 s
 1.0
-Mat
+pavement
 190
 0.3 s
 0.9
@@ -157,7 +157,7 @@ Gravel
 struct Profile { int pwm; float rampSec; float turnGain; };
 Profile PROFILES[4] = {
   {220, 0.2, 1.0},  // tile
-  {190, 0.3, 0.9},  // mat
+  {190, 0.3, 0.9},  // pavement
   {170, 0.4, 0.8},  // carpet
   {130, 0.6, 0.6},  // gravel
 };
@@ -210,7 +210,7 @@ Override PWM set-point (used only if inference is off-device)
 
 4. ML Training Pipeline (Python)
 4.1 Data collection protocol
-4 classes: tile, mat, carpet, gravel
+4 classes: tile, pavement, carpet, gravel
 4 × 3-minute sessions per class, on separate days — not one long run
 3 PWM levels (low/med/high) per class, so the model learns terrain, not speed
 Split by session, not by window — train on sessions 1–3, hold out session 4 (prevents inflated accuracy from overlapping windows leaking into test)
@@ -226,11 +226,11 @@ def extract_features(sig):
 Start with DecisionTreeClassifier(max_depth=5) — interpretable, prints as a readable tree
 Compare against KNN (k=5) and RandomForest (100 trees) via session-wise cross-validation
 Pick the simplest model within ~2% of the best accuracy
-Report a confusion matrix — expect carpet/mat to be the most confusable pair
+Report a confusion matrix — expect carpet/pavement to be the most confusable pair
 4.4 Exporting to C++
 Use micromlgen (or scikit-learn's own tree export, hand-adapted) to convert the trained tree into the header used in Section 3.3:
 from micromlgen import port
-cpp_code = port(clf, classmap={0:'tile', 1:'mat', 2:'carpet', 3:'gravel'})
+cpp_code = port(clf, classmap={0:'tile', 1:'pavement', 2:'carpet', 3:'gravel'})
 with open('terrain_classifier.h', 'w') as f:
     f.write(cpp_code)
 Regenerate and replace firmware/terrain_classifier.h every time the model is retrained on new data. Do not hand-edit the generated header.

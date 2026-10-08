@@ -1,13 +1,13 @@
 # Terrain-Aware Autonomous Rover
 
-An ESP32-based rover that classifies the surface it's driving on — **tile, mat, carpet, or gravel** — in real time using IMU vibration, and automatically adjusts its speed and torque profile to maintain traction.
+An ESP32-based rover that classifies the surface it's driving on — **tile, pavement, carpet, or gravel** — in real time using IMU vibration, and automatically adjusts its speed and torque profile to maintain traction.
 
 ```
 MPU6050 (100 Hz IMU)
     → 1s windowed accel signal (z-axis, gravity-removed)
-    → 5-D feature vector: std, rms, p2p, zcr, speed
+    → 6-D feature vector: std, peak, rms, p2p, zcr, speed
     → on-device decision tree classifier  (terrain_classifier.h)
-    → terrain label: tile / mat / carpet / gravel
+    → terrain label: tile / pavement / carpet / gravel
     → adaptive PWM + transition-pair ramp control
     → L298N dual H-bridge → 2× DC motors
 ```
@@ -34,9 +34,30 @@ Different surfaces have very different traction properties. A rover running at f
 | Motor driver | L298N dual H-bridge | ENA/ENB jumpers **must be removed** for PWM speed control |
 | Motors | 2× yellow TT DC motors | Rear-left (ch A) + Rear-right (ch B); front caster is passive |
 | Display | SSD1306 0.96″ OLED (128×64) | I²C addr 0x3C, shared SDA/SCL bus with MPU6050 |
-| Power | 3S 18650 Li-ion (11.1 V) + 3S BMS | Motor supply; L298N 5 V reg powers ESP32 via VIN |
+| Power | 3S 18650 Li-ion (11.1 V) + 3S BMS | Drives motors via L298N; L298N 5 V output → ESP32 VIN (no buck converter — see capacitor note below) |
 
 > **Mounting critical:** bolt the MPU6050 directly to the chassis frame, near a wheel mount — not on foam or a loose breadboard. Soft mounting low-pass-filters the vibration signal and kills classification accuracy.
+
+### Power Supply — Required Decoupling Capacitors
+
+The ESP32 reboots (brown-out reset) the moment a motor command is sent because motor startup inrush current causes a brief voltage dip on the supply rail.  A capacitor is **required** to stabilise the 5 V rail:
+
+| Location | Capacitor | Polarity | Purpose |
+|----------|-----------|----------|---------|
+| L298N `12V / VCC` → `GND` terminals | **470–1000 µF** electrolytic, ≥ 16 V | + to VCC, − to GND | Absorbs motor inrush current; prevents voltage collapse on the motor rail |
+| L298N `5V out` → `GND`, **as close to ESP32 `VIN`/`GND` as possible** | **100–220 µF** electrolytic, ≥ 10 V | + to 5 V, − to GND | Keeps the 5 V rail stable during motor startup so ESP32 does not brown-out |
+
+> **No buck converter is used.** The L298N's onboard 5 V regulator (enabled when its 5 V Enable jumper is in place) supplies the ESP32 directly.  The 100–220 µF cap on the 5 V output is the only additional component needed.
+
+**Placement rules:**
+- Solder the caps directly across the screw terminals / power pads — not at the end of long wires.
+- Keep leads as short as possible; every cm of wire adds inductance that reduces effectiveness.
+- A small 100 nF ceramic cap in parallel with each electrolytic (same pads) helps filter high-frequency switching noise from the L298N.
+
+**Firmware soft-start (complementary fix):**  
+The firmware also ramps motor PWM from 0 → target over 150 ms (`RAMP_STEPS = 15 × RAMP_STEP_MS = 10 ms`) whenever a `go`, `back`, `turn`, or `spin` command is received.  This reduces the inrush spike magnitude even before the cap has time to respond, and makes the cap requirement less critical.
+
+> **Diagnosis:** if the ESP32 still reboots after adding the cap, open the Serial Monitor — a brown-out will print `rst:0xc (SW_CPU_RESET)` or `rst:0x10 (RTCWDT_RTC_RESET)` in the boot log.  Increase cap value or reduce the default `currentPwm` starting value.
 
 ### Pin Map
 
@@ -62,7 +83,7 @@ Different surfaces have very different traction properties. A rover running at f
 The firmware runs in one of two modes, switchable at any time from the WiFi dashboard or Serial:
 
 ### Training Mode
-- You select the current terrain label (Tile / Mat / Carpet / Gravel) via the dashboard or `LABEL <name>` Serial command
+- You select the current terrain label (Tile / Pavement / Carpet / Gravel) via the dashboard or `LABEL <name>` Serial command
 - Every 1-second feature window is tagged with your label and logged to Serial CSV
 - Use this to collect `hw_dataset.csv` for re-training on real hardware
 
@@ -86,10 +107,10 @@ The ESP32 creates a WiFi Access Point — no router needed.
 Open the URL from any phone or PC browser. The dashboard provides:
 
 - **Mode toggle** — Training / Testing
-- **Terrain selector** (Training mode) — large buttons for Tile / Mat / Carpet / Gravel
+- **Terrain selector** (Training mode) — large buttons for Tile / Pavement / Carpet / Gravel
 - **Classification result** (Testing mode) — Predicted vs Actual with ✓/✗ match indicator and confidence bar
 - **Motor controls** — PWM slider (0–255), GO / STOP buttons
-- **Live vibration gauges** — std, rms, p2p, zcr, speed updated every second via WebSocket
+- **Live vibration gauges** — std, peak, rms, p2p, zcr, speed updated every second via WebSocket
 - **Data logging** — REC / STOP, sample counter, Download CSV button
 
 ---
@@ -124,7 +145,7 @@ Speed targets and turn gains are stored in `terrain_classifier.h` and applied au
 | Terrain | Max PWM | Accel Ramp (s) | Turn Gain |
 |---------|---------|----------------|-----------|
 | Tile    | 220     | 0.20           | 1.00      |
-| Mat     | 190     | 0.30           | 0.90      |
+| pavement     | 190     | 0.30           | 0.90      |
 | Carpet  | 170     | 0.40           | 0.80      |
 | Gravel  | 130     | 0.60           | 0.60      |
 
@@ -138,15 +159,15 @@ Rather than snapping instantly to the new terrain's speed target, the controller
 |-----------------|---------------------|--------------|-----------------------------------|
 | tile → gravel   | 0.04                | 4            | Sudden rough — brake hard, wait   |
 | tile → carpet   | 0.08                | 3            | Moderate softening                |
-| tile → mat      | 0.10                | 2            | Subtle — quick ramp               |
-| mat → gravel    | 0.05                | 4            | Rough incoming — brake firmly     |
-| mat → carpet    | 0.09                | 2            | Near-similar — gentle             |
-| mat → tile      | 0.12                | 2            | Smoother — ease up                |
+| tile → pavement      | 0.10                | 2            | Subtle — quick ramp               |
+| pavement → gravel    | 0.05                | 4            | Rough incoming — brake firmly     |
+| pavement → carpet    | 0.09                | 2            | Near-similar — gentle             |
+| pavement → tile      | 0.12                | 2            | Smoother — ease up                |
 | carpet → gravel | 0.05                | 4            | Big jump in roughness             |
-| carpet → mat    | 0.10                | 2            | Slight improvement                |
+| carpet → pavement    | 0.10                | 2            | Slight improvement                |
 | carpet → tile   | 0.14                | 1            | Much smoother — accelerate freely |
 | gravel → carpet | 0.08                | 3            | Some improvement — ramp gently    |
-| gravel → mat    | 0.10                | 2            | Clear improvement                 |
+| gravel → pavement    | 0.10                | 2            | Clear improvement                 |
 | gravel → tile   | 0.15                | 1            | Suddenly smooth — quick ramp      |
 
 > **Ramp Rate** is per 0.1 s control tick (one feature window). **Hold Windows** = consecutive matching labels required before the transition is committed.
@@ -213,7 +234,7 @@ Drive on each surface at 3 PWM levels (see table below), ~10 s per run:
 | Terrain | PWM levels |
 |---------|-----------|
 | Tile    | 180, 220, 255 |
-| Mat     | 150, 190, 230 |
+| pavement     | 150, 190, 230 |
 | Carpet  | 135, 170, 205 |
 | Gravel  | 100, 130, 165 |
 
@@ -248,7 +269,7 @@ python terrain_sim.py --view-adaptive --seed 42 # reproducible track
 
 **Mixed-terrain terminal output:**
 ```
-Track (6 segments): tile → gravel → carpet → mat → mat → gravel
+Track (6 segments): tile → gravel → carpet → pavement → pavement → gravel
 Controller: BLIND (IMU only)  |  Looping: yes
 
 t=  2.14s | RMS=0.082 | terrain→tile    | speed=0.55 m/s
@@ -267,7 +288,7 @@ The classifier is trained on **340 windows** generated from MuJoCo rollouts acro
 | Terrain | Samples | Avg STD | Avg RMS | Avg P2P | Avg ZCR | Speed range (m/s) |
 |---------|---------|---------|---------|---------|---------|-------------------|
 | Tile    | 85      | 0.413   | 0.416   | 3.844   | 53.2    | 0.288 – 0.525     |
-| Mat     | 85      | 0.290   | 0.291   | 2.167   | 55.4    | 0.247 – 0.463     |
+| pavement     | 85      | 0.290   | 0.291   | 2.167   | 55.4    | 0.247 – 0.463     |
 | Carpet  | 85      | 0.254   | 0.255   | 2.020   | 54.7    | 0.206 – 0.422     |
 | Gravel  | 85      | 0.476   | 0.477   | 4.615   | 46.3    | 0.165 – 0.340     |
 
@@ -275,18 +296,18 @@ The classifier is trained on **340 windows** generated from MuJoCo rollouts acro
 
 The original classifier used a single RMS threshold per terrain:
 ```python
-RMS_THRESHOLDS = [(0.273, "carpet"), (0.354, "mat"), (0.447, "tile"), (inf, "gravel")]
+RMS_THRESHOLDS = [(0.273, "carpet"), (0.354, "pavement"), (0.447, "tile"), (inf, "gravel")]
 ```
 This breaks at higher speeds — **tile driven fast** produces RMS values that overlap with gravel and carpet. Vibration RMS is speed-dependent, so a single threshold per terrain can't separate all cases.
 
 ### Solution: Decision tree on Speed + Vibration
 
-Adding **rover speed (m/s)** as a 5th feature alongside std, rms, p2p, zcr cleanly separates all four terrain classes. The classifier is a depth-5 decision tree exported to pure C++ — no ML library needed on the ESP32.
+Adding **rover speed (m/s)** as a 6th feature alongside std, peak, rms, p2p, zcr cleanly separates all four terrain classes. The classifier is a depth-5 decision tree exported to pure C++ — no ML library needed on the ESP32.
 
 ```
 5-fold CV accuracy:  77.1% ± 11.2%  (340-sample simulation dataset)
 Training set accuracy: 81.2%
-Feature importances: speed > std > rms > p2p > zcr
+Feature importances: speed > peak > std > rms > p2p > zcr
 ```
 
 **Per-class results (training set):**
@@ -295,7 +316,7 @@ Feature importances: speed > std > rms > p2p > zcr
 |--------|-----------|--------|----------|
 | carpet | 0.65      | 0.79   | 0.71     |
 | gravel | 1.00      | 0.84   | 0.91     |
-| mat    | 0.77      | 0.60   | 0.68     |
+| pavement    | 0.77      | 0.60   | 0.68     |
 | tile   | 0.85      | 1.00   | 0.92     |
 
 Accuracy is expected to improve significantly when retrained on real hardware data (simulation vibration amplitudes are estimates).
@@ -314,8 +335,7 @@ This calibration is embedded in `terrain_classifier.h` as `PWM_SPEED_SLOPE` and 
 
 ## Key Constants
 
-| Constant | Value | Location |
-|----------|-------|----------|
+| IMU accel range | ±8 g (AFS_SEL = 2) | Firmware — prevents gravel clipping |
 | Sample rate | 100 Hz | Firmware loop |
 | Window size | 100 samples (1 s) | Feature extraction |
 | Hold windows | 1–4 (per terrain pair) | Transition ramp table |
@@ -324,7 +344,8 @@ This calibration is embedded in `terrain_classifier.h` as `PWM_SPEED_SLOPE` and 
 | WiFi AP IP | 192.168.4.1 | WebServer |
 | WebSocket port | 81 | WebSocketsServer |
 | Serial baud | 115200 | USB Serial |
-| Motor supply | 7–12 V (3S Li-ion recommended) | Battery |
+| Motor supply | 7–12 V (3S Li-ion recommended) | Battery → L298N |
+| 5 V supply | L298N onboard regulator → ESP32 VIN (no buck converter) | Decoupled with 100–220 µF cap |
 | PWM→speed slope | 0.001471 m/s per PWM unit | terrain_classifier.h |
 | PWM→speed intercept | −0.000265 m/s | terrain_classifier.h |
 
