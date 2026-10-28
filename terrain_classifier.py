@@ -238,6 +238,6 @@ else:
         "}\n"
     )
 
-    with open(OUT_HEADER, "w") as fh:
+    with open(OUT_HEADER, "w", encoding="utf-8") as fh:
         fh.write(full_header)
     print(f"Wrote {OUT_HEADER} via {how}; classes {classmap}")

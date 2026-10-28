@@ -107,16 +107,16 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
   /* ── mode switcher ───────────────────────────────────────────────────────── */
   .mode-tabs {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr;
     gap: 8px;
   }
   .mode-btn {
-    padding: 10px;
+    padding: 10px 6px;
     border-radius: var(--radius);
     border: 1px solid var(--border);
     background: transparent;
     color: var(--muted);
-    font-size: .85rem;
+    font-size: .78rem;
     font-weight: 600;
     cursor: pointer;
     transition: all .2s;
@@ -130,6 +130,11 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
     background: rgba(63,185,80,.15);
     border-color: var(--green);
     color: var(--green);
+  }
+  .mode-btn.active[data-mode="sweep"] {
+    background: rgba(210,153,34,.15);
+    border-color: var(--amber);
+    color: var(--amber);
   }
 
   /* ── terrain buttons ─────────────────────────────────────────────────────── */
@@ -397,6 +402,167 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
   /* ── misc ────────────────────────────────────────────────────────────────── */
   .hidden { display: none !important; }
   .divider { border: none; border-top: 1px solid var(--border); margin: 4px 0 12px; }
+  /* ── adaptive speed toggle ──────────────────────────────────────────────── */
+  .adaptive-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 10px;
+  }
+  .adaptive-label { flex: 1; font-size: .82rem; color: var(--text); }
+  .adaptive-sublabel { font-size: .72rem; color: var(--muted); }
+  .toggle-pill {
+    position: relative;
+    width: 44px; height: 24px;
+    background: var(--border);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: background .25s;
+    flex-shrink: 0;
+  }
+  .toggle-pill.on { background: var(--green); }
+  .toggle-pill::after {
+    content: '';
+    position: absolute;
+    top: 3px; left: 3px;
+    width: 18px; height: 18px;
+    background: white;
+    border-radius: 50%;
+    transition: transform .25s;
+    box-shadow: 0 1px 4px rgba(0,0,0,.4);
+  }
+  .toggle-pill.on::after { transform: translateX(20px); }
+  .adaptive-target {
+    font-size: .78rem;
+    color: var(--green);
+    font-weight: 700;
+    min-width: 80px;
+    text-align: right;
+  }
+
+  /* ── sweep panel ───────────────────────────────────────────────────────── */
+  .speed-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .speed-pill {
+    padding: 5px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+    font-size: .78rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all .18s;
+  }
+  .speed-pill.selected {
+    border-color: var(--amber);
+    background: rgba(210,153,34,.15);
+    color: var(--amber);
+  }
+  .dwell-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .dwell-row label { font-size: .8rem; color: var(--muted); min-width: 80px; }
+  .dwell-val { font-size: .9rem; font-weight: 700; color: var(--amber); min-width: 38px; text-align: right; }
+  .sweep-progress-wrap {
+    margin: 10px 0;
+  }
+  .sweep-step-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: .78rem;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .sweep-step-header b { color: var(--amber); }
+  .sweep-track {
+    height: 10px;
+    background: var(--border);
+    border-radius: 5px;
+    overflow: hidden;
+    margin-bottom: 6px;
+  }
+  .sweep-fill {
+    height: 100%;
+    border-radius: 5px;
+    background: linear-gradient(90deg, var(--amber), #f0a000);
+    transition: width .5s ease;
+  }
+  .sweep-dwell-track {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 4px;
+  }
+  .sweep-dwell-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: rgba(210,153,34,.5);
+    transition: width .4s linear;
+  }
+  .sweep-stats {
+    display: flex;
+    justify-content: space-between;
+    font-size: .76rem;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+  .sweep-stats b { color: var(--text); }
+  .btn-sweep-start {
+    display: block; width: 100%;
+    padding: 13px;
+    border-radius: var(--radius);
+    border: 2px solid var(--amber);
+    background: rgba(210,153,34,.1);
+    color: var(--amber);
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all .18s;
+    margin-bottom: 8px;
+  }
+  .btn-sweep-start:hover { background: rgba(210,153,34,.25); }
+  .btn-sweep-start.active { background: var(--amber); color: #0d1117; }
+  .btn-sweep-stop {
+    display: block; width: 100%;
+    padding: 10px;
+    border-radius: var(--radius);
+    border: 2px solid var(--red);
+    background: rgba(248,81,73,.08);
+    color: var(--red);
+    font-size: .88rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all .18s;
+    margin-bottom: 4px;
+  }
+  .btn-sweep-stop:hover { background: rgba(248,81,73,.22); }
+  .sweep-complete-banner {
+    display: none;
+    text-align: center;
+    padding: 12px;
+    border-radius: var(--radius);
+    background: rgba(63,185,80,.15);
+    border: 1px solid var(--green);
+    color: var(--green);
+    font-weight: 700;
+    font-size: .9rem;
+    margin-top: 8px;
+  }
+  .sweep-complete-banner.show { display: block; }
+
 </style>
 </head>
 <body>
@@ -417,9 +583,11 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
     <div class="card-title">Operating Mode</div>
     <div class="mode-tabs">
       <button class="mode-btn active" data-mode="train" id="btnTrain"
-              onclick="switchMode('train')">🟦 Training Mode</button>
+              onclick="switchMode('train')">&#x1F7E6; Training</button>
       <button class="mode-btn" data-mode="test" id="btnTest"
-              onclick="switchMode('test')">🟩 Testing Mode</button>
+              onclick="switchMode('test')">&#x1F7E9; Testing</button>
+      <button class="mode-btn" data-mode="sweep" id="btnSweep"
+              onclick="switchMode('sweep')">&#x1F7E7; Auto Sweep</button>
     </div>
   </div>
 
@@ -522,6 +690,116 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
 
 
   <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- AUTO SWEEP MODE PANEL                                                    -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div id="sweepPanel" class="hidden">
+
+    <!-- Terrain Selector for Sweep -->
+    <div class="card">
+      <div class="card-title">Terrain Label (for this sweep)</div>
+      <div class="terrain-grid">
+        <button class="terrain-btn selected" data-t="tile" onclick="setSweepLabel('tile')">
+          <span class="t-icon">🪨</span>TILE
+        </button>
+        <button class="terrain-btn" data-t="pavement" onclick="setSweepLabel('pavement')">
+          <span class="t-icon">🟧</span>PAVEMENT
+        </button>
+        <button class="terrain-btn" data-t="carpet" onclick="setSweepLabel('carpet')">
+          <span class="t-icon">🧶</span>CARPET
+        </button>
+        <button class="terrain-btn" data-t="gravel" onclick="setSweepLabel('gravel')">
+          <span class="t-icon">⚫</span>GRAVEL
+        </button>
+      </div>
+    </div>
+
+    <!-- Speed Steps Config -->
+    <div class="card">
+      <div class="card-title">Speed Steps</div>
+      <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px">
+        Select which PWM steps to sweep. Each step runs for the dwell time below.
+      </p>
+      <div class="speed-pills" id="speedPills">
+        <span class="speed-pill selected" data-pwm="80"  onclick="togglePill(this)">80</span>
+        <span class="speed-pill selected" data-pwm="100" onclick="togglePill(this)">100</span>
+        <span class="speed-pill selected" data-pwm="120" onclick="togglePill(this)">120</span>
+        <span class="speed-pill selected" data-pwm="140" onclick="togglePill(this)">140</span>
+        <span class="speed-pill selected" data-pwm="160" onclick="togglePill(this)">160</span>
+        <span class="speed-pill selected" data-pwm="180" onclick="togglePill(this)">180</span>
+        <span class="speed-pill"          data-pwm="200" onclick="togglePill(this)">200</span>
+        <span class="speed-pill"          data-pwm="220" onclick="togglePill(this)">220</span>
+      </div>
+      <div class="dwell-row">
+        <label>Dwell / step</label>
+        <input id="dwellSlider" type="range" min="2" max="20" value="5" step="1"
+               style="flex:1;accent-color:var(--amber);height:4px;cursor:pointer"
+               oninput="document.getElementById('dwellVal').textContent=this.value+'s'">
+        <div class="dwell-val" id="dwellVal">5s</div>
+      </div>
+    </div>
+
+    <!-- Sweep Progress -->
+    <div class="card">
+      <div class="card-title">Sweep Progress</div>
+      <div class="sweep-progress-wrap">
+        <div class="sweep-step-header">
+          <span>Step <b id="sweepStepDisp">---</b> / <b id="sweepTotalDisp">---</b></span>
+          <span>PWM: <b id="sweepPwmDisp" style="color:var(--amber)">---</b></span>
+        </div>
+        <div class="sweep-track">
+          <div class="sweep-fill" id="sweepFill" style="width:0%"></div>
+        </div>
+        <div class="sweep-dwell-track">
+          <div class="sweep-dwell-fill" id="sweepDwellFill" style="width:0%"></div>
+        </div>
+        <div class="sweep-stats">
+          <span>Samples this step: <b id="sweepStepSamples">0</b></span>
+          <span>Total logged: <b id="sweepTotalSamples">0</b></span>
+        </div>
+      </div>
+      <div class="sweep-complete-banner" id="sweepCompleteBanner">
+        &#x2705; Sweep complete! Download CSV below.
+      </div>
+      <button class="btn-sweep-start" id="btnSweepStart" onclick="startSweep()">
+        &#x25B6; START SWEEP
+      </button>
+      <button class="btn-sweep-stop" onclick="stopSweep()">
+        &#x25A0; STOP
+      </button>
+      <button class="btn-dl" onclick="downloadCSV('train')" style="margin-top:6px">
+        &#x2B07; Download sweep_dataset.csv
+      </button>
+    </div>
+
+    <!-- Live Vibration Gauges (Sweep) -->
+    <div class="card">
+      <div class="card-title">Live Vibration Features</div>
+      <div class="gauge-row">
+        <div class="gauge-name">STD</div>
+        <div class="gauge-track"><div class="gauge-fill" id="sgStd" style="width:0%"></div></div>
+        <div class="gauge-val" id="svStd">0.000</div>
+      </div>
+      <div class="gauge-row">
+        <div class="gauge-name">RMS</div>
+        <div class="gauge-track"><div class="gauge-fill" id="sgRms" style="width:0%"></div></div>
+        <div class="gauge-val" id="svRms">0.000</div>
+      </div>
+      <div class="gauge-row">
+        <div class="gauge-name">P2P</div>
+        <div class="gauge-track"><div class="gauge-fill" id="sgP2p" style="width:0%"></div></div>
+        <div class="gauge-val" id="svP2p">0.000</div>
+      </div>
+      <div class="gauge-row">
+        <div class="gauge-name">ZCR</div>
+        <div class="gauge-track"><div class="gauge-fill" id="sgZcr" style="width:0%"></div></div>
+        <div class="gauge-val" id="svZcr">0</div>
+      </div>
+    </div>
+
+  </div><!-- /sweepPanel -->
+
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
   <!-- TESTING MODE PANEL                                                     -->
   <!-- ══════════════════════════════════════════════════════════════════════ -->
   <div id="testPanel" class="hidden">
@@ -539,6 +817,18 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
       </div>
 
       <hr class="divider">
+
+      <!-- Adaptive speed readout -->
+      <div class="adaptive-row">
+        <div>
+          <div class="adaptive-label">&#x26A1; Adaptive Speed Control</div>
+          <div class="adaptive-sublabel" id="adaptiveReadout">Sets PWM automatically per terrain</div>
+        </div>
+        <div id="adaptiveTarget" class="adaptive-target"></div>
+        <div class="toggle-pill" id="adaptivePill" onclick="toggleAdaptive()"></div>
+      </div>
+
+      <hr class="divider" style="margin-top:0">
 
       <!-- Feedback buttons -->
       <div class="feedback-prompt" id="fbPrompt">Was that correct?</div>
@@ -674,6 +964,9 @@ let currentMode  = 'train';
 let isRecording  = false;
 let isRunning    = false;
 let currentPwm   = 150;
+let adaptiveOn   = true;   // mirrors firmware adaptiveSpeedEnabled
+let sweepRunning = false;
+let sweepLabel   = 'tile';
 
 // In-browser log buffers (for CSV download)
 let trainRows    = [];   // Training mode rows
@@ -741,6 +1034,12 @@ function handleMsg(d) {
     setModeUI(d.mode);
   }
 
+  // Adaptive toggle sync
+  if (d.adaptive !== undefined && d.adaptive !== adaptiveOn) {
+    adaptiveOn = d.adaptive;
+    document.getElementById('adaptivePill').classList.toggle('on', adaptiveOn);
+  }
+
   // Gauges
   if (d.mode === 'train' || currentMode === 'train') {
     updateGauges('', d.std, d.rms, d.p2p, d.zcr);
@@ -764,6 +1063,16 @@ function handleMsg(d) {
     document.getElementById('confBar').style.width  = conf + '%';
     document.getElementById('confLabel').textContent = 'Confidence: ' + conf + '%';
 
+    // Adaptive speed readout
+    if (d.adaptive_target_pwm !== undefined && d.adaptive_target_pwm > 0 && adaptiveOn) {
+      document.getElementById('adaptiveTarget').textContent = `→ PWM ${d.adaptive_target_pwm}`;
+      document.getElementById('adaptiveReadout').textContent =
+        `Auto-set for ${(d.predicted || '?').toUpperCase()} terrain`;
+    } else if (!adaptiveOn) {
+      document.getElementById('adaptiveTarget').textContent = '';
+      document.getElementById('adaptiveReadout').textContent = 'Manual speed (adaptive OFF)';
+    }
+
     // Feedback pending → new window → reset UI
     if (d.feedback_pending) {
       resetFeedbackUI();
@@ -779,6 +1088,11 @@ function handleMsg(d) {
     document.getElementById('sErr').textContent   = err;
     document.getElementById('accBar').style.width = pct + '%';
     document.getElementById('accPct').textContent = pct + '%';
+  }
+
+  if (d.mode === 'sweep') {
+    updateGauges('s', d.std, d.rms, d.p2p, d.zcr);
+    handleSweepState(d);
   }
 }
 
@@ -806,8 +1120,10 @@ function setModeUI(m) {
   currentMode = m;
   document.getElementById('trainPanel').classList.toggle('hidden', m !== 'train');
   document.getElementById('testPanel') .classList.toggle('hidden', m !== 'test');
+  document.getElementById('sweepPanel').classList.toggle('hidden', m !== 'sweep');
   document.getElementById('btnTrain').classList.toggle('active', m === 'train');
   document.getElementById('btnTest') .classList.toggle('active', m === 'test');
+  document.getElementById('btnSweep').classList.toggle('active', m === 'sweep');
 }
 
 // ─── Terrain label ────────────────────────────────────────────────────────────
@@ -816,6 +1132,99 @@ function setLabel(t) {
     b.classList.toggle('selected', b.dataset.t === t);
   });
   send({ cmd: 'label', value: t });
+}
+
+function setSweepLabel(t) {
+  sweepLabel = t;
+  document.querySelectorAll('#sweepPanel .terrain-btn').forEach(b => {
+    b.classList.toggle('selected', b.dataset.t === t);
+  });
+  send({ cmd: 'label', value: t });
+}
+
+// ─── Speed pill toggle (sweep) ────────────────────────────────────────────────
+function togglePill(el) {
+  el.classList.toggle('selected');
+}
+
+function buildSweepSteps() {
+  const selected = [...document.querySelectorAll('#speedPills .speed-pill.selected')];
+  return selected.map(p => parseInt(p.dataset.pwm)).sort((a,b) => a-b);
+}
+
+// ─── Adaptive speed toggle ──────────────────────────────────────────────────
+function toggleAdaptive() {
+  adaptiveOn = !adaptiveOn;
+  document.getElementById('adaptivePill').classList.toggle('on', adaptiveOn);
+  send({ cmd: 'adaptive', value: adaptiveOn });
+  if (!adaptiveOn) {
+    document.getElementById('adaptiveTarget').textContent = '';
+    document.getElementById('adaptiveReadout').textContent = 'Manual speed (adaptive OFF)';
+  } else {
+    document.getElementById('adaptiveReadout').textContent = 'Sets PWM automatically per terrain';
+  }
+}
+// Init adaptive pill state on page load
+window.addEventListener('load', () => {
+  document.getElementById('adaptivePill').classList.add('on');
+});
+
+// ─── Sweep control ─────────────────────────────────────────────────────────
+function startSweep() {
+  const steps = buildSweepSteps();
+  if (steps.length === 0) { alert('Select at least one speed step.'); return; }
+  const dwellSec = parseInt(document.getElementById('dwellSlider').value);
+  document.getElementById('sweepCompleteBanner').classList.remove('show');
+  document.getElementById('sweepFill').style.width = '0%';
+  document.getElementById('sweepDwellFill').style.width = '0%';
+  document.getElementById('sweepStepSamples').textContent = '0';
+  document.getElementById('sweepTotalSamples').textContent = '0';
+  document.getElementById('sweepTotalDisp').textContent = steps.length;
+  document.getElementById('sweepStepDisp').textContent = '1';
+  document.getElementById('sweepPwmDisp').textContent = steps[0];
+  document.getElementById('btnSweepStart').classList.add('active');
+  sweepRunning = true;
+  send({ cmd: 'autosweep', action: 'start', dwell_ms: dwellSec * 1000, steps: steps });
+}
+
+function stopSweep() {
+  sweepRunning = false;
+  document.getElementById('btnSweepStart').classList.remove('active');
+  send({ cmd: 'autosweep', action: 'stop' });
+}
+
+function handleSweepState(d) {
+  sweepRunning = d.sweep_active;
+  document.getElementById('btnSweepStart').classList.toggle('active', sweepRunning);
+
+  const step  = (d.sweep_step || 0) + 1;  // 1-indexed for display
+  const total = d.sweep_total_steps || 1;
+  document.getElementById('sweepStepDisp').textContent  = sweepRunning ? step : '---';
+  document.getElementById('sweepTotalDisp').textContent = total;
+  document.getElementById('sweepPwmDisp').textContent   = sweepRunning ? (d.sweep_step_pwm || '---') : '---';
+
+  const stepPct = total > 0 ? Math.round(((step - 1) / total) * 100) : 0;
+  document.getElementById('sweepFill').style.width = stepPct + '%';
+
+  const dwellTotal   = d.sweep_dwell_ms || 1;
+  const dwellElapsed = d.sweep_elapsed_ms || 0;
+  const dwellPct = Math.min(100, Math.round((dwellElapsed / dwellTotal) * 100));
+  document.getElementById('sweepDwellFill').style.width = dwellPct + '%';
+
+  document.getElementById('sweepStepSamples').textContent  = d.sweep_samples_step || 0;
+  document.getElementById('sweepTotalSamples').textContent = d.samples_logged || 0;
+
+  // Auto-log to trainRows during sweep
+  if (sweepRunning && d.actual) {
+    trainRows.push([d.std, d.rms, d.p2p, d.zcr, d.speed, d.pwm, d.actual, d.uptime*1000].join(','));
+  }
+
+  // Completion banner
+  if (!sweepRunning && (d.sweep_step || 0) >= (d.sweep_total_steps || 1) - 1
+      && (d.sweep_total_steps || 0) > 0) {
+    document.getElementById('sweepCompleteBanner').classList.add('show');
+    document.getElementById('sweepFill').style.width = '100%';
+  }
 }
 
 // ─── Motor control ────────────────────────────────────────────────────────────

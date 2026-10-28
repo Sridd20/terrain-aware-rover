@@ -1,14 +1,14 @@
-# Terrain-Aware Autonomous Rover
+﻿# Terrain-Aware Autonomous Rover
 
-An ESP32-based rover that classifies the surface it's driving on — **tile, pavement, carpet, or gravel** — in real time using IMU vibration, and automatically adjusts its speed and torque profile to maintain traction.
+An ESP32-based rover that classifies the surface it's driving on — **tile, pavement, carpet, or gravel** — in real time using IMU vibration, and automatically adjusts its speed to match the terrain.
 
 ```
 MPU6050 (100 Hz IMU)
     → 1s windowed accel signal (z-axis, gravity-removed)
-    → 6-D feature vector: std, peak, rms, p2p, zcr, speed
+    → 3-feature vector: std, p2p, zcr
     → on-device decision tree classifier  (terrain_classifier.h)
     → terrain label: tile / pavement / carpet / gravel
-    → adaptive PWM + transition-pair ramp control
+    → adaptive PWM ramp to terrain target speed
     → L298N dual H-bridge → 2× DC motors
 ```
 
@@ -18,10 +18,10 @@ MPU6050 (100 Hz IMU)
 
 Different surfaces have very different traction properties. A rover running at full speed on gravel will lose traction and slip; the same speed on tile is fine. By detecting the surface from vibration signature alone (no camera, no extra sensors), the rover can:
 
-- **Reduce PWM** on low-grip surfaces like gravel before a slip happens
-- **Smooth speed transitions** with per-pair ramp rates (e.g., gravel→tile ramps up faster than tile→gravel brakes)
-- **Reduce turn gain** on loose surfaces to keep straight-line traction
-- **Confirm terrain changes** over multiple windows before committing (prevents flickering at seams)
+- **Automatically set speed** to the optimal PWM for each terrain — no manual tuning needed
+- **Enforce a hard safety ceiling** so even if the user requests too much speed, the firmware caps it
+- **Smooth speed transitions** with soft-start ramps on every terrain change
+- **Collect richer datasets** using Auto Sweep mode — multiple speeds recorded automatically
 
 ---
 
@@ -30,34 +30,25 @@ Different surfaces have very different traction properties. A rover running at f
 | Component | Part | Notes |
 |-----------|------|-------|
 | MCU | ESP32 DevKit V1 (30-pin) | WiFi AP + WebSocket + OLED + motor control |
-| IMU | MPU6050 | I²C addr 0x68, GPIO 21 (SDA) / 22 (SCL) |
+| IMU | MPU6050 | I2C addr 0x68, GPIO 21 (SDA) / 22 (SCL) |
 | Motor driver | L298N dual H-bridge | ENA/ENB jumpers **must be removed** for PWM speed control |
-| Motors | 2× yellow TT DC motors | Rear-left (ch A) + Rear-right (ch B); front caster is passive |
-| Display | SSD1306 0.96″ OLED (128×64) | I²C addr 0x3C, shared SDA/SCL bus with MPU6050 |
-| Power | 3S 18650 Li-ion (11.1 V) + 3S BMS | Drives motors via L298N; L298N 5 V output → ESP32 VIN (no buck converter — see capacitor note below) |
+| Motors | 2x yellow TT DC motors | Rear-left (ch A) + Rear-right (ch B); front caster is passive |
+| Display | SSD1306 0.96" OLED (128x64) | I2C addr 0x3C, shared SDA/SCL bus with MPU6050 |
+| Power | 3S 18650 Li-ion (11.1 V) + 3S BMS | Drives motors via L298N; L298N 5 V output to ESP32 VIN |
 
 > **Mounting critical:** bolt the MPU6050 directly to the chassis frame, near a wheel mount — not on foam or a loose breadboard. Soft mounting low-pass-filters the vibration signal and kills classification accuracy.
 
 ### Power Supply — Required Decoupling Capacitors
 
-The ESP32 reboots (brown-out reset) the moment a motor command is sent because motor startup inrush current causes a brief voltage dip on the supply rail.  A capacitor is **required** to stabilise the 5 V rail:
+The ESP32 reboots (brown-out reset) the moment a motor command is sent because motor startup inrush current causes a brief voltage dip on the supply rail. A capacitor is **required** to stabilise the 5 V rail:
 
-| Location | Capacitor | Polarity | Purpose |
-|----------|-----------|----------|---------|
-| L298N `12V / VCC` → `GND` terminals | **470–1000 µF** electrolytic, ≥ 16 V | + to VCC, − to GND | Absorbs motor inrush current; prevents voltage collapse on the motor rail |
-| L298N `5V out` → `GND`, **as close to ESP32 `VIN`/`GND` as possible** | **100–220 µF** electrolytic, ≥ 10 V | + to 5 V, − to GND | Keeps the 5 V rail stable during motor startup so ESP32 does not brown-out |
+| Location | Capacitor | Purpose |
+|----------|-----------|---------|
+| L298N 12V/VCC to GND terminals | 470-1000 uF electrolytic, >= 16 V | Absorbs motor inrush current |
+| L298N 5V out to GND, near ESP32 VIN/GND | 100-220 uF electrolytic, >= 10 V | Keeps 5 V rail stable during motor startup |
 
-> **No buck converter is used.** The L298N's onboard 5 V regulator (enabled when its 5 V Enable jumper is in place) supplies the ESP32 directly.  The 100–220 µF cap on the 5 V output is the only additional component needed.
-
-**Placement rules:**
-- Solder the caps directly across the screw terminals / power pads — not at the end of long wires.
-- Keep leads as short as possible; every cm of wire adds inductance that reduces effectiveness.
-- A small 100 nF ceramic cap in parallel with each electrolytic (same pads) helps filter high-frequency switching noise from the L298N.
-
-**Firmware soft-start (complementary fix):**  
-The firmware also ramps motor PWM from 0 → target over 150 ms (`RAMP_STEPS = 15 × RAMP_STEP_MS = 10 ms`) whenever a `go`, `back`, `turn`, or `spin` command is received.  This reduces the inrush spike magnitude even before the cap has time to respond, and makes the cap requirement less critical.
-
-> **Diagnosis:** if the ESP32 still reboots after adding the cap, open the Serial Monitor — a brown-out will print `rst:0xc (SW_CPU_RESET)` or `rst:0x10 (RTCWDT_RTC_RESET)` in the boot log.  Increase cap value or reduce the default `currentPwm` starting value.
+**Firmware soft-start (complementary fix):**
+The firmware ramps motor PWM from 0 to target over 150 ms (`RAMP_STEPS = 15 x RAMP_STEP_MS = 10 ms`) whenever a `go`, `back`, `turn`, or `spin` command is received — including when the adaptive controller changes speed.
 
 ### Pin Map
 
@@ -65,32 +56,42 @@ The firmware also ramps motor PWM from 0 → target over 150 ms (`RAMP_STEPS = 1
 |--------|-----------|-------|
 | L298N IN1 (Left dir A) | 27 | |
 | L298N IN2 (Left dir B) | 26 | |
-| L298N IN3 (Right dir A) | 25 | ADC2_CH8 — see note below |
+| L298N IN3 (Right dir A) | 25 | ADC2_CH8 — WiFi conflict, workaround in firmware |
 | L298N IN4 (Right dir B) | 33 | |
 | L298N ENA (Left PWM) | 14 | LEDC ch 4, 1 kHz |
-| L298N ENB (Right PWM) | **13** | LEDC ch 5, 1 kHz — **not 12** |
+| L298N ENB (Right PWM) | **13** | LEDC ch 5, 1 kHz — **not GPIO 12** |
 | MPU6050 / OLED SDA | 21 | |
 | MPU6050 / OLED SCL | 22 | |
 
-> **ENB pin:** the firmware uses **GPIO 13** for ENB, not GPIO 12. GPIO 12 is a bootstrap pin on ESP32 that can prevent booting if held HIGH at power-on.
-
-> **GPIO 25 (IN3) — ADC2 / WiFi conflict:** GPIO 25 is `ADC2_CH8` on the ESP32. When `WiFi.softAP()` starts, the WiFi stack uses ADC2 internally for RF calibration and silently reconfigures ADC2 pins as analog inputs, which breaks `digitalWrite`. The firmware works around this by re-asserting `pinMode(OUTPUT)` inside `setRightMotor()` on every call. If you redesign the wiring, move IN3 to a non-ADC2 GPIO (e.g. GPIO 16, 17, or 18) to avoid this entirely.
+> **ENB pin:** uses GPIO 13, not GPIO 12. GPIO 12 is a bootstrap pin that can prevent booting if held HIGH at power-on.
 
 ---
 
 ## Operating Modes
 
-The firmware runs in one of two modes, switchable at any time from the WiFi dashboard or Serial:
+The firmware runs in one of **three modes**, switchable at any time from the WiFi dashboard or Serial:
 
 ### Training Mode
-- You select the current terrain label (Tile / Pavement / Carpet / Gravel) via the dashboard or `LABEL <name>` Serial command
+
+- Select the current terrain label (Tile / Pavement / Carpet / Gravel) via the dashboard or `LABEL <name>` Serial command
 - Every 1-second feature window is tagged with your label and logged to Serial CSV
-- Use this to collect `hw_dataset.csv` for re-training on real hardware
+- Use this to collect `train_dataset.csv` for re-training on real hardware
+- Drive manually and record — full motor control available
 
 ### Testing Mode
+
 - The on-board decision tree classifier (`terrain_classifier.h`) predicts the terrain every 1-second window
-- OLED and dashboard show **Predicted** terrain + confidence
-- You confirm (✓) or correct (✗) via the dashboard — feedback rows are logged for future retraining
+- OLED and dashboard show **Predicted** terrain + confidence bar
+- **Adaptive Speed Control** automatically ramps motors to the terrain's optimal PWM target (toggle on/off from the dashboard)
+- You confirm (YES) or correct (NO) via the dashboard — feedback rows are logged for future retraining
+
+### Auto Sweep Mode *(new)*
+
+- The rover **automatically steps through a configurable set of PWM values** on a chosen terrain
+- Each speed step runs for a configurable dwell time (2-20 s), logs IMU feature windows, then advances
+- Up to 8 speed steps can be configured via the dashboard speed-pill selector
+- After completing all steps, motors stop and a completion banner is shown
+- Purpose: collect **multi-speed training data** efficiently without manually changing PWM
 
 ---
 
@@ -104,73 +105,89 @@ The ESP32 creates a WiFi Access Point — no router needed.
 | Password | `rover1234` |
 | Dashboard URL | `http://192.168.4.1` |
 
-Open the URL from any phone or PC browser. The dashboard provides:
+Open the URL from any phone or PC browser. The dashboard has **three panels** (Training / Testing / Auto Sweep):
 
-- **Mode toggle** — Training / Testing
-- **Terrain selector** (Training mode) — large buttons for Tile / Pavement / Carpet / Gravel
-- **Classification result** (Testing mode) — Predicted vs Actual with ✓/✗ match indicator and confidence bar
-- **Motor controls** — PWM slider (0–255), GO / STOP buttons
-- **Live vibration gauges** — std, peak, rms, p2p, zcr, speed updated every second via WebSocket
+### Training Panel
+- **Terrain selector** — large buttons for Tile / Pavement / Carpet / Gravel
+- **Motor controls** — PWM slider (0-255), GO / STOP, D-pad, spin buttons
+- **Live vibration gauges** — STD, RMS, P2P, ZCR updated every second via WebSocket
 - **Data logging** — REC / STOP, sample counter, Download CSV button
+
+### Testing Panel
+- **Terrain prediction** — large terrain label + confidence bar
+- **Adaptive Speed Control** toggle pill — when ON, firmware auto-ramps to terrain's target PWM; current target shown live (e.g., `-> PWM 200`)
+- **Feedback buttons** — YES / NO + correction terrain picker
+- **Motor controls** — PWM slider (respects adaptive setting), D-pad
+- **Session stats** — total predictions, correct count, accuracy bar
+
+### Auto Sweep Panel
+- **Terrain label selector** — which terrain is being swept
+- **Speed step pills** — toggle individual PWM values (80 / 100 / 120 / 140 / 160 / 180 / 200 / 220)
+- **Dwell slider** — time per step (2-20 seconds)
+- **Progress display** — overall step progress bar + per-step dwell sub-bar + sample counters
+- **START SWEEP / STOP** — starts the autonomous sweep sequence
+- **Download CSV** — downloads all collected windows
 
 ---
 
 ## OLED Display
 
-The 128×64 OLED mounted on the rover shows at a glance:
+The 128x64 OLED mounted on the rover shows at a glance:
 
 ```
-┌────────────────────────────────┐
-│ TERRAIN-AWARE ROVER    00:02:34│  ← uptime
-├────────────────────────────────┤
-│ Mode: TRAINING                 │  ← current mode
-│ Actual:    TILE                │  ← your selected label
-│ Predicted: TILE  ✓             │  ← classifier + match icon
-├────────────────────────────────┤
-│ RMS: 0.141   ZCR: 57          │
-│ STD: 0.142   P2P: 1.37        │
-├────────────────────────────────┤
-│ PWM:180  0.29m/s  WiFi:1  REC●│  ← motor, speed, clients, rec
-└────────────────────────────────┘
+[TRAIN]              00:02:34   <- mode + uptime
+Surface:
+TILE                            <- your selected label
+RMS: 0.141   ZCR: 57
+STD: 0.142   P2P: 1.37
+PWM:180  0.29m/s  REC          <- motor + speed + rec
 ```
 
-When **predicted ≠ actual**, the predicted label inverts (white on black) so mismatches are obvious while the rover is in motion.
+In **Testing Mode**, the predicted terrain is shown large with a match indicator. When predicted != actual, the predicted label inverts so mismatches are obvious while the rover is in motion.
 
 ---
 
 ## Adaptive Driving Profiles
 
-Speed targets and turn gains are stored in `terrain_classifier.h` and applied automatically after each terrain classification:
+Each terrain has a **target PWM** (optimal cruise speed) and a **max PWM** (hard safety ceiling), stored in `terrain_classifier.h`:
 
-| Terrain | Max PWM | Accel Ramp (s) | Turn Gain |
-|---------|---------|----------------|-----------|
-| Tile    | 220     | 0.20           | 1.00      |
-| pavement     | 190     | 0.30           | 0.90      |
-| Carpet  | 170     | 0.40           | 0.80      |
-| Gravel  | 130     | 0.60           | 0.60      |
+| Terrain  | Target PWM | Max PWM | Accel Ramp (s) | Turn Gain |
+|----------|-----------|---------|----------------|-----------|
+| Tile     | 200       | 220     | 0.20           | 1.00      |
+| Pavement | 170       | 200     | 0.30           | 0.90      |
+| Carpet   | 150       | 170     | 0.40           | 0.80      |
+| Gravel   | 110       | 130     | 0.60           | 0.60      |
 
-Lower max PWM and a longer acceleration ramp on rough terrain prevent wheel slip. Reduced turn gain on loose surfaces maintains straight-line traction during cornering.
+**Adaptive ON (default):** when the classifier fires, the firmware calls `rampMotors()` to smoothly transition to the terrain's `targetPwm`. Serial logs `[ADAPTIVE] gravel -> PWM 110 (target 110, max 130)`.
 
-### Transition-Pair Ramp Control
+**Adaptive OFF:** the controller only enforces the `maxPwm` ceiling — useful when you want manual speed control during data collection.
 
-Rather than snapping instantly to the new terrain's speed target, the controller interpolates smoothly using a per-pair ramp table. The new label must be confirmed over **K consecutive 1-second windows** before committing (prevents false triggers at noisy surface seams).
+---
 
-| From → To       | Ramp Rate (m/s·tick) | Hold Windows | Rationale                         |
-|-----------------|---------------------|--------------|-----------------------------------|
-| tile → gravel   | 0.04                | 4            | Sudden rough — brake hard, wait   |
-| tile → carpet   | 0.08                | 3            | Moderate softening                |
-| tile → pavement      | 0.10                | 2            | Subtle — quick ramp               |
-| pavement → gravel    | 0.05                | 4            | Rough incoming — brake firmly     |
-| pavement → carpet    | 0.09                | 2            | Near-similar — gentle             |
-| pavement → tile      | 0.12                | 2            | Smoother — ease up                |
-| carpet → gravel | 0.05                | 4            | Big jump in roughness             |
-| carpet → pavement    | 0.10                | 2            | Slight improvement                |
-| carpet → tile   | 0.14                | 1            | Much smoother — accelerate freely |
-| gravel → carpet | 0.08                | 3            | Some improvement — ramp gently    |
-| gravel → pavement    | 0.10                | 2            | Clear improvement                 |
-| gravel → tile   | 0.15                | 1            | Suddenly smooth — quick ramp      |
+## Auto Sweep — Data Collection Workflow
 
-> **Ramp Rate** is per 0.1 s control tick (one feature window). **Hold Windows** = consecutive matching labels required before the transition is committed.
+To build a multi-speed dataset for a single terrain:
+
+1. Place rover on the terrain and label it (e.g., **CARPET**)
+2. Switch to **Auto Sweep** mode in the dashboard
+3. Select the desired PWM steps (e.g., 80, 100, 120, 140, 160, 180) and set dwell to **8 s**
+4. Press **START SWEEP** — the rover drives forward, steps through each PWM automatically
+5. Each 1-second IMU window is logged with its `label` and `pwm` to Serial CSV (same `TRAIN,...` format)
+6. After the last step, motors stop and "Sweep complete!" banner appears
+7. Download `sweep_dataset.csv` from the dashboard, or capture via `collect_data.py` over Serial
+8. Repeat for each terrain surface
+
+**Why multi-speed data matters:** vibration features (STD, P2P, ZCR) are speed-dependent. A classifier trained at only one speed will fail at other speeds. Sweeping 6 PWM levels x 8 s x 100 Hz = **~48 windows per terrain per sweep** — enough to retrain a robust speed-invariant decision tree.
+
+### Serial commands for Auto Sweep
+
+| Command | Action |
+|---------|--------|
+| `MODE SWEEP` | Switch to Auto Sweep mode |
+| `SWEEP START` | Begin sweep with current config |
+| `SWEEP STOP` | Abort sweep, stop motors |
+| `SWEEP DWELL <ms>` | Set dwell time in milliseconds |
+| `LABEL <name>` | Set terrain label before sweep |
 
 ---
 
@@ -179,31 +196,30 @@ Rather than snapping instantly to the new terrain's speed target, the controller
 ```
 terrain_sim.py              MuJoCo physics sim — heightfield terrain + 4-wheel rover
 generate_ml_dataset.py      Generate ML training data from MuJoCo (ml_dataset.csv)
-mujoco_to_firmware.py       Train decision tree on ml_dataset.csv → export terrain_classifier.h
+mujoco_to_firmware.py       Train decision tree on ml_dataset.csv -> export terrain_classifier.h
 terrain_classifier.py       Standalone sklearn classifier — scatter plots, feature importances
 plot_scatter.py             Scatter plot: Vibration RMS vs Speed (presentation figure)
 plot_dataset_summary.py     Dataset summary table (presentation figure)
 export_summary_csv.py       Export per-class statistics CSV
 
-dataset.csv                 Original 108-sample dataset (3 PWM × 4 terrains × 9 samples)
-ml_dataset.csv              340-sample dataset (5 PWM × 4 terrains × 17 samples, + speed)
+dataset.csv                 Original 108-sample dataset (3 PWM x 4 terrains x 9 samples)
+ml_dataset.csv              340-sample dataset (5 PWM x 4 terrains x 17 samples, + speed)
 ml_dataset_fresh.csv        Extended dataset from longer MuJoCo rollouts
 dataset_summary.csv         Per-class feature statistics (std, rms, p2p, zcr, speed range)
 mujoco_classifier_report.txt  Training report: accuracy, confusion matrix, feature importances
 
-ml_classifier_plan.md       ML classifier design decisions and presentation slide plan
-transition_aware_features.md  Transition-pair ramp control architecture
-implementation_plan_v2.md   Full hardware build plan (wiring, firmware, dashboard, OLED)
+data/
+    carpet_train_dataset.csv    Real hardware data — carpet terrain
+    gravel_train_dataset.csv    Real hardware data — gravel terrain
+    pavement_train_dataset.csv  Real hardware data — pavement terrain
+    tile_train_dataset.csv      Real hardware data — tile terrain
 
 rover_firmware/
     rover_firmware.ino      Main ESP32 firmware — IMU, OLED, WiFi AP, WebSocket, motors
-    dashboard.h             Embedded HTML/CSS/JS web dashboard (served as C string)
-    terrain_classifier.h    Auto-generated decision tree (from mujoco_to_firmware.py)
-    collect_data.py         PC-side Serial logger — writes hw_dataset.csv
-
-scatter_speed_vib.png       Vibration vs Speed scatter (why RMS alone fails)
-dataset_summary_table.png   Per-class feature summary table
-example_plots.png           MuJoCo accelerometer traces for all 4 terrains
+                            Modes: TRAINING, TESTING, AUTO_SWEEP
+    dashboard.h             Embedded HTML/CSS/JS web dashboard (3-tab: Train/Test/Sweep)
+    terrain_classifier.h    Decision tree + terrain driving profiles (targetPwm, maxPwm)
+    collect_data.py         PC-side Serial logger — writes train_dataset.csv + feedback_log.csv
 ```
 
 ---
@@ -216,7 +232,7 @@ Install required Arduino libraries (Library Manager):
 - **WebSockets** by Markus Sattler
 - **Adafruit SSD1306**
 - **Adafruit GFX Library**
-- **ArduinoJson** by Benoît Blanchon
+- **ArduinoJson** by Benoit Blanchon
 
 Open `rover_firmware/rover_firmware.ino` in Arduino IDE, select **ESP32 Dev Module**, flash.
 
@@ -225,31 +241,42 @@ Open `rover_firmware/rover_firmware.ino` in Arduino IDE, select **ESP32 Dev Modu
 1. Connect phone/PC to WiFi `TerrainRover` (password: `rover1234`)
 2. Open `http://192.168.4.1` in browser
 3. Switch to **Training Mode**, select terrain, set PWM, tap GO
-4. Drive over each surface → data logs automatically every 1 second
+4. Drive over each surface — data logs automatically every 1 second
 
-### 3. Collect real-world data
+### 3a. Collect real-world data (manual)
 
-Drive on each surface at 3 PWM levels (see table below), ~10 s per run:
+Drive on each surface at several PWM levels, ~10 s per run:
 
-| Terrain | PWM levels |
-|---------|-----------|
-| Tile    | 180, 220, 255 |
-| pavement     | 150, 190, 230 |
-| Carpet  | 135, 170, 205 |
-| Gravel  | 100, 130, 165 |
+| Terrain  | Suggested PWM levels |
+|----------|---------------------|
+| Tile     | 160, 180, 200, 220  |
+| Pavement | 140, 160, 180, 200  |
+| Carpet   | 120, 140, 160, 180  |
+| Gravel   | 80, 100, 120, 140   |
 
-Download `hw_dataset.csv` from the dashboard, or use `rover_firmware/collect_data.py` over Serial.
+Download `train_dataset.csv` from the dashboard, or use `rover_firmware/collect_data.py` over Serial.
+
+### 3b. Collect real-world data (Auto Sweep — recommended)
+
+1. Place rover on terrain, select terrain label in dashboard
+2. Switch to **Auto Sweep** mode
+3. Tick the PWM steps to sweep (e.g. 80 to 180 in steps of 20)
+4. Set dwell to 8 s, press **START SWEEP**
+5. Rover drives, steps through speeds, stops automatically
+6. Download CSV — repeat for each terrain
+
+This is faster and more systematic than manual collection.
 
 ### 4. Re-train classifier (optional)
 
 ```bash
 python mujoco_to_firmware.py   # trains on ml_dataset.csv by default
 # or pass your real hardware data:
-python mujoco_to_firmware.py --dataset hw_dataset.csv
-# → writes rover_firmware/terrain_classifier.h
+python mujoco_to_firmware.py --dataset train_dataset.csv
+# -> writes rover_firmware/terrain_classifier.h
 ```
 
-Re-flash firmware. Switch to **Testing Mode** and compare predicted vs actual terrain labels.
+Re-flash firmware. Switch to **Testing Mode** — the rover now classifies terrain on-device and sets speed adaptively.
 
 ---
 
@@ -267,85 +294,45 @@ python terrain_sim.py --view-adaptive --seed 42 # reproducible track
 
 > This is **not** a substitute for real data — bump amplitudes are estimates. Use it to validate the feature extraction and ML pipeline before hardware is ready.
 
-**Mixed-terrain terminal output:**
-```
-Track (6 segments): tile → gravel → carpet → pavement → pavement → gravel
-Controller: BLIND (IMU only)  |  Looping: yes
-
-t=  2.14s | RMS=0.082 | terrain→tile    | speed=0.55 m/s
-t=  4.30s | RMS=0.499 | terrain→carpet  | speed=0.28 m/s
-t=  4.35s | RMS=1.134 | terrain→gravel  | speed=0.18 m/s
-```
-
 ---
 
 ## ML Classifier
 
-### Dataset
+The classifier is a **depth-5 decision tree** trained on std, p2p, zcr features, exported to pure C++ in `terrain_classifier.h` — no ML library needed on the ESP32.
 
-The classifier is trained on **340 windows** generated from MuJoCo rollouts across 5 PWM levels × 4 terrain classes (85 samples per class):
+| Class    | Precision | Recall | F1-Score |
+|----------|-----------|--------|----------|
+| carpet   | 0.65      | 0.79   | 0.71     |
+| gravel   | 1.00      | 0.84   | 0.91     |
+| pavement | 0.77      | 0.60   | 0.68     |
+| tile     | 0.85      | 1.00   | 0.92     |
 
-| Terrain | Samples | Avg STD | Avg RMS | Avg P2P | Avg ZCR | Speed range (m/s) |
-|---------|---------|---------|---------|---------|---------|-------------------|
-| Tile    | 85      | 0.413   | 0.416   | 3.844   | 53.2    | 0.288 – 0.525     |
-| pavement     | 85      | 0.290   | 0.291   | 2.167   | 55.4    | 0.247 – 0.463     |
-| Carpet  | 85      | 0.254   | 0.255   | 2.020   | 54.7    | 0.206 – 0.422     |
-| Gravel  | 85      | 0.476   | 0.477   | 4.615   | 46.3    | 0.165 – 0.340     |
+Accuracy improves significantly when retrained on real hardware multi-speed data — use Auto Sweep to collect this.
 
-### Why the RMS threshold fails
-
-The original classifier used a single RMS threshold per terrain:
-```python
-RMS_THRESHOLDS = [(0.273, "carpet"), (0.354, "pavement"), (0.447, "tile"), (inf, "gravel")]
-```
-This breaks at higher speeds — **tile driven fast** produces RMS values that overlap with gravel and carpet. Vibration RMS is speed-dependent, so a single threshold per terrain can't separate all cases.
-
-### Solution: Decision tree on Speed + Vibration
-
-Adding **rover speed (m/s)** as a 6th feature alongside std, peak, rms, p2p, zcr cleanly separates all four terrain classes. The classifier is a depth-5 decision tree exported to pure C++ — no ML library needed on the ESP32.
+### PWM to Speed Calibration
 
 ```
-5-fold CV accuracy:  77.1% ± 11.2%  (340-sample simulation dataset)
-Training set accuracy: 81.2%
-Feature importances: speed > peak > std > rms > p2p > zcr
+speed_ms = 0.001471 x PWM - 0.000265    (RMSE: 0.0001 m/s)
 ```
 
-**Per-class results (training set):**
-
-| Class  | Precision | Recall | F1-Score |
-|--------|-----------|--------|----------|
-| carpet | 0.65      | 0.79   | 0.71     |
-| gravel | 1.00      | 0.84   | 0.91     |
-| pavement    | 0.77      | 0.60   | 0.68     |
-| tile   | 0.85      | 1.00   | 0.92     |
-
-Accuracy is expected to improve significantly when retrained on real hardware data (simulation vibration amplitudes are estimates).
-
-### PWM → Speed Calibration
-
-The firmware derives rover speed from PWM using a linear model fitted from MuJoCo rollouts:
-
-```
-speed_ms = 0.001471 × PWM − 0.000265    (RMSE: 0.0001 m/s)
-```
-
-This calibration is embedded in `terrain_classifier.h` as `PWM_SPEED_SLOPE` and `PWM_SPEED_INTERCEPT`.
+Embedded in `terrain_classifier.h` as `PWM_SPEED_SLOPE` and `PWM_SPEED_INTERCEPT`.
 
 ---
 
 ## Key Constants
 
-| IMU accel range | ±8 g (AFS_SEL = 2) | Firmware — prevents gravel clipping |
+| Parameter | Value | Location |
+|-----------|-------|----------|
+| IMU accel range | +-8 g (AFS_SEL = 2) | Firmware |
 | Sample rate | 100 Hz | Firmware loop |
 | Window size | 100 samples (1 s) | Feature extraction |
-| Hold windows | 1–4 (per terrain pair) | Transition ramp table |
-| OLED address | 0x3C | I²C bus |
-| MPU6050 address | 0x68 | I²C bus |
+| OLED address | 0x3C | I2C bus |
+| MPU6050 address | 0x68 | I2C bus |
 | WiFi AP IP | 192.168.4.1 | WebServer |
 | WebSocket port | 81 | WebSocketsServer |
 | Serial baud | 115200 | USB Serial |
-| Motor supply | 7–12 V (3S Li-ion recommended) | Battery → L298N |
-| 5 V supply | L298N onboard regulator → ESP32 VIN (no buck converter) | Decoupled with 100–220 µF cap |
-| PWM→speed slope | 0.001471 m/s per PWM unit | terrain_classifier.h |
-| PWM→speed intercept | −0.000265 m/s | terrain_classifier.h |
-
+| Motor supply | 7-12 V (3S Li-ion) | Battery to L298N |
+| PWM to speed slope | 0.001471 m/s per PWM unit | terrain_classifier.h |
+| PWM to speed intercept | -0.000265 m/s | terrain_classifier.h |
+| Sweep max steps | 8 | rover_firmware.ino |
+| Default sweep dwell | 5000 ms | rover_firmware.ino |

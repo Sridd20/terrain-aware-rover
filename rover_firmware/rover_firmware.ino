@@ -103,7 +103,7 @@ Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 // ═══════════════════════════════════════════════════════════════════════════════
 // Mode
 // ═══════════════════════════════════════════════════════════════════════════════
-enum RoverMode { TRAINING, TESTING };
+enum RoverMode { TRAINING, TESTING, AUTO_SWEEP };
 RoverMode currentMode = TRAINING;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -137,6 +137,24 @@ float feat_speed = 0.0f;
 // ═══════════════════════════════════════════════════════════════════════════════
 int  currentPwm    = 0;
 bool motorsRunning = false;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Adaptive speed control
+// ═══════════════════════════════════════════════════════════════════════════════
+bool adaptiveSpeedEnabled = true;   // Enabled by default in TESTING mode
+int  adaptiveTargetPwm    = 0;       // Last target set by terrain classifier
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Auto-Sweep (data collection) state
+// ═══════════════════════════════════════════════════════════════════════════════
+#define SWEEP_MAX_STEPS  8
+int  sweepPwmSteps[SWEEP_MAX_STEPS] = {80, 110, 130, 150, 170, 190, 210, 230};
+int  sweepStepCount  = 6;           // Number of active steps
+int  sweepStepIdx    = 0;           // Current step (0-based)
+int  sweepDwellMs    = 5000;        // Milliseconds to hold each PWM step
+int  sweepSamplesPerStep = 0;       // Samples logged at current step
+unsigned long sweepStepStartMs = 0; // millis() when current step began
+bool sweepActive     = false;       // Sweep is running
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Data logging
@@ -412,8 +430,11 @@ void printSerialRow() {
 // WebSocket broadcast  (every feature window + on command)
 // ─────────────────────────────────────────────────────────────────────────────
 void broadcastState() {
-    StaticJsonDocument<512> doc;
-    doc["mode"]           = (currentMode == TRAINING) ? "train" : "test";
+    StaticJsonDocument<768> doc;
+    // Mode string
+    const char* modeStr = (currentMode == TRAINING) ? "train" :
+                          (currentMode == TESTING)   ? "test"  : "sweep";
+    doc["mode"]           = modeStr;
     doc["std"]            = feat_std;
     doc["peak"]           = feat_peak;
     doc["rms"]            = feat_rms;
@@ -426,9 +447,10 @@ void broadcastState() {
     doc["running"]        = motorsRunning;
 
     if (currentMode == TRAINING) {
-        doc["actual"] = actualLabel;
+        doc["actual"]   = actualLabel;
+        doc["adaptive"] = adaptiveSpeedEnabled;
 
-    } else {
+    } else if (currentMode == TESTING) {
         doc["predicted"]         = predictedLabel;
         doc["confidence"]        = classifyConfidence();
         doc["actual"]            = actualLabel;
@@ -436,6 +458,18 @@ void broadcastState() {
         doc["feedback_pending"]  = !feedbackGiven;
         doc["total_predictions"] = totalPredictions;
         doc["total_correct"]     = totalCorrect;
+        doc["adaptive"]          = adaptiveSpeedEnabled;
+        doc["adaptive_target_pwm"] = adaptiveTargetPwm;
+
+    } else { // AUTO_SWEEP
+        doc["actual"]              = actualLabel;
+        doc["sweep_active"]        = sweepActive;
+        doc["sweep_step"]          = sweepStepIdx;
+        doc["sweep_total_steps"]   = sweepStepCount;
+        doc["sweep_step_pwm"]      = sweepActive ? sweepPwmSteps[sweepStepIdx] : 0;
+        doc["sweep_dwell_ms"]      = sweepDwellMs;
+        doc["sweep_elapsed_ms"]    = sweepActive ? (int)(millis() - sweepStepStartMs) : 0;
+        doc["sweep_samples_step"]  = sweepSamplesPerStep;
     }
 
     String json;
@@ -555,8 +589,16 @@ void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t lengt
 
     if (strcmp(cmd, "mode") == 0) {
         const char* val = doc["value"] | "";
-        if (strcmp(val, "train") == 0) currentMode = TRAINING;
-        else if (strcmp(val, "test") == 0) currentMode = TESTING;
+        if (strcmp(val, "train") == 0) {
+            // Stop any active sweep when switching away
+            if (sweepActive) { sweepActive = false; stopMotors(); }
+            currentMode = TRAINING;
+        } else if (strcmp(val, "test") == 0) {
+            if (sweepActive) { sweepActive = false; stopMotors(); }
+            currentMode = TESTING;
+        } else if (strcmp(val, "sweep") == 0) {
+            currentMode = AUTO_SWEEP;
+        }
         feedbackGiven = false;
 
     } else if (strcmp(cmd, "label") == 0) {
@@ -567,12 +609,18 @@ void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t lengt
         currentPwm = constrain((int)doc["value"], 0, 255);
         if (motorsRunning) setMotors(currentPwm, true);
 
+    } else if (strcmp(cmd, "adaptive") == 0) {
+        // Toggle or set adaptive speed mode
+        adaptiveSpeedEnabled = (bool)doc["value"];
+        Serial.printf("[ADAPTIVE] %s\n", adaptiveSpeedEnabled ? "ON" : "OFF");
+
     } else if (strcmp(cmd, "go") == 0) {
         motorsRunning = true;
         if (currentPwm == 0) currentPwm = 150;
         rampMotors(currentPwm, true);   // soft-start: ramp 0→PWM to limit inrush
 
     } else if (strcmp(cmd, "stop") == 0) {
+        if (sweepActive) { sweepActive = false; }
         stopMotors();
 
     } else if (strcmp(cmd, "turn") == 0) {
@@ -594,6 +642,39 @@ void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t lengt
     } else if (strcmp(cmd, "rec") == 0) {
         recording = (bool)doc["value"];
         if (!recording) samplesLogged = 0;
+
+    } else if (strcmp(cmd, "autosweep") == 0) {
+        // {"cmd":"autosweep","action":"start"|"stop",
+        //  "dwell_ms":5000,"steps":[80,120,160,200]}
+        const char* action = doc["action"] | "stop";
+        if (strcmp(action, "start") == 0) {
+            // Load optional config from payload
+            if (doc.containsKey("dwell_ms")) {
+                sweepDwellMs = constrain((int)doc["dwell_ms"], 1000, 30000);
+            }
+            if (doc.containsKey("steps") && doc["steps"].is<JsonArray>()) {
+                JsonArray arr = doc["steps"];
+                sweepStepCount = min((int)arr.size(), SWEEP_MAX_STEPS);
+                for (int i = 0; i < sweepStepCount; i++) {
+                    sweepPwmSteps[i] = constrain((int)arr[i], 50, 230);
+                }
+            }
+            // Start sweep
+            sweepStepIdx        = 0;
+            sweepSamplesPerStep = 0;
+            sweepActive         = true;
+            recording           = true;
+            currentPwm          = sweepPwmSteps[0];
+            sweepStepStartMs    = millis();
+            rampMotors(currentPwm, true);
+            Serial.printf("[SWEEP] Started: %d steps, dwell=%dms, terrain=%s\n",
+                sweepStepCount, sweepDwellMs, actualLabel.c_str());
+        } else {
+            sweepActive = false;
+            stopMotors();
+            recording   = false;
+            Serial.println("[SWEEP] Stopped");
+        }
 
     } else if (strcmp(cmd, "feedback") == 0) {
         // Testing mode: user pressed YES or NO
@@ -629,9 +710,12 @@ void handleSerial() {
     line.trim();
     if (line.length() == 0) return;
 
-    if      (line == "MODE TRAIN")           { currentMode = TRAINING; feedbackGiven = false; }
-    else if (line == "MODE TEST")            { currentMode = TESTING;  feedbackGiven = false; }
+    if      (line == "MODE TRAIN")  { if(sweepActive){sweepActive=false;stopMotors();} currentMode = TRAINING; feedbackGiven = false; }
+    else if (line == "MODE TEST")   { if(sweepActive){sweepActive=false;stopMotors();} currentMode = TESTING;  feedbackGiven = false; }
+    else if (line == "MODE SWEEP")  { currentMode = AUTO_SWEEP; }
     else if (line.startsWith("LABEL "))      { actualLabel = line.substring(6); }
+    else if (line == "ADAPTIVE ON")  { adaptiveSpeedEnabled = true;  Serial.println("[ADAPTIVE] ON");  }
+    else if (line == "ADAPTIVE OFF") { adaptiveSpeedEnabled = false; Serial.println("[ADAPTIVE] OFF"); }
     else if (line.startsWith("PWM ")) {
         currentPwm = constrain(line.substring(4).toInt(), 0, 255);
         if (motorsRunning) setMotors(currentPwm, true);
@@ -650,9 +734,27 @@ void handleSerial() {
     else if (line == "TURN RIGHT") { motorsRunning=true; if(!currentPwm) currentPwm=150; rampTurnMotors(currentPwm, 1); }
     else if (line == "SPIN LEFT")  { motorsRunning=true; if(!currentPwm) currentPwm=150; rampSpinMotors(currentPwm,-1); }
     else if (line == "SPIN RIGHT") { motorsRunning=true; if(!currentPwm) currentPwm=150; rampSpinMotors(currentPwm, 1); }
-    else if (line == "STOP")       { stopMotors(); }
+    else if (line == "STOP")       { if(sweepActive){sweepActive=false;} stopMotors(); }
     else if (line == "REC ON")               { recording = true; }
     else if (line == "REC OFF")              { recording = false; samplesLogged = 0; }
+    else if (line == "SWEEP START") {
+        if (currentMode != AUTO_SWEEP) currentMode = AUTO_SWEEP;
+        sweepStepIdx = 0; sweepSamplesPerStep = 0;
+        sweepActive = true; recording = true;
+        currentPwm = sweepPwmSteps[0];
+        sweepStepStartMs = millis();
+        rampMotors(currentPwm, true);
+        Serial.printf("[SWEEP] Started terrain=%s dwell=%dms steps=%d\n",
+            actualLabel.c_str(), sweepDwellMs, sweepStepCount);
+    }
+    else if (line == "SWEEP STOP") {
+        sweepActive = false; stopMotors(); recording = false;
+        Serial.println("[SWEEP] Stopped");
+    }
+    else if (line.startsWith("SWEEP DWELL ")) {
+        sweepDwellMs = constrain(line.substring(12).toInt(), 1000, 30000);
+        Serial.printf("[SWEEP] dwell_ms=%d\n", sweepDwellMs);
+    }
     else if (line == "CORRECT YES") {
         feedbackGiven = true; predCorrect = true;
         actualLabel = predictedLabel;
@@ -666,10 +768,11 @@ void handleSerial() {
         if (recording) { printSerialRow(); samplesLogged++; }
     }
     else if (line == "STATUS") {
-        Serial.printf("Mode:%s Actual:%s Predicted:%s PWM:%d Running:%d Rec:%d\n",
-            currentMode == TRAINING ? "TRAIN" : "TEST",
+        Serial.printf("Mode:%s Actual:%s Predicted:%s PWM:%d Running:%d Rec:%d Adaptive:%d Sweep:%d/%d\n",
+            currentMode == TRAINING ? "TRAIN" : currentMode == TESTING ? "TEST" : "SWEEP",
             actualLabel.c_str(), predictedLabel.c_str(),
-            currentPwm, motorsRunning, recording);
+            currentPwm, motorsRunning, recording,
+            adaptiveSpeedEnabled, sweepStepIdx+1, sweepStepCount);
     }
 
     updateOLED();
@@ -769,13 +872,29 @@ void loop() {
                 predictedLabel = classify();  // also sets g_last_confidence
                 feedbackGiven  = false;        // new window — reset feedback state
 
-                // Apply terrain-specific driving profile from MuJoCo calibration.
-                // Find the matching profile index (TERRAIN_NAMES[] is alphabetical).
+                // ── Adaptive speed control ─────────────────────────────────────
+                // For each recognised terrain, look up its driving profile.
+                // If adaptive control is ON, smoothly ramp to the terrain's
+                // optimal target PWM.  The maxPwm ceiling is always enforced.
                 for (int ti = 0; ti < 4; ti++) {
                     if (predictedLabel == TERRAIN_NAMES[ti]) {
-                        // Clamp currentPwm to the terrain's safe maximum.
-                        if (motorsRunning && currentPwm > TERRAIN_PROFILES[ti].maxPwm) {
-                            currentPwm = TERRAIN_PROFILES[ti].maxPwm;
+                        const TerrainProfile& prof = TERRAIN_PROFILES[ti];
+                        int safeCap = (int)prof.maxPwm;
+
+                        if (adaptiveSpeedEnabled && motorsRunning) {
+                            // Ramp to target, but never exceed the safety cap
+                            int target = min((int)prof.targetPwm, safeCap);
+                            if (currentPwm != target) {
+                                adaptiveTargetPwm = target;
+                                currentPwm = target;
+                                rampMotors(currentPwm, true);
+                                Serial.printf("[ADAPTIVE] %s → PWM %d (target %d, max %d)\n",
+                                    predictedLabel.c_str(), currentPwm,
+                                    prof.targetPwm, prof.maxPwm);
+                            }
+                        } else if (motorsRunning && currentPwm > safeCap) {
+                            // Adaptive off: still enforce safety ceiling
+                            currentPwm = safeCap;
                             setMotors(currentPwm, true);
                         }
                         break;
@@ -786,10 +905,38 @@ void loop() {
             updateOLED();
             broadcastState();
 
-            // In TRAINING mode, log every window automatically when recording
-            if (recording && currentMode == TRAINING) {
+            // In TRAINING or AUTO_SWEEP mode, log every window when recording
+            if (recording && (currentMode == TRAINING || currentMode == AUTO_SWEEP)) {
                 printSerialRow();
                 samplesLogged++;
+                if (currentMode == AUTO_SWEEP) sweepSamplesPerStep++;
+            }
+        }
+    }
+
+    // ── Auto-Sweep state machine ─────────────────────────────────────────────
+    // Runs independently of the IMU window timer: checks elapsed dwell time
+    // and advances to the next PWM step when the dwell period expires.
+    if (sweepActive) {
+        unsigned long elapsed = millis() - sweepStepStartMs;
+        if ((int)elapsed >= sweepDwellMs) {
+            // Advance to next step
+            sweepStepIdx++;
+            if (sweepStepIdx >= sweepStepCount) {
+                // Sweep complete
+                sweepActive  = false;
+                recording    = false;
+                stopMotors();
+                Serial.printf("[SWEEP] Complete! Total samples: %d\n", samplesLogged);
+                broadcastState();
+            } else {
+                sweepSamplesPerStep = 0;
+                currentPwm          = sweepPwmSteps[sweepStepIdx];
+                sweepStepStartMs    = millis();
+                rampMotors(currentPwm, true);
+                Serial.printf("[SWEEP] Step %d/%d → PWM %d\n",
+                    sweepStepIdx+1, sweepStepCount, currentPwm);
+                broadcastState();
             }
         }
     }
