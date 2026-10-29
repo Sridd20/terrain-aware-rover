@@ -95,11 +95,12 @@ if missing:
 unused = [c for c in FEATURE_POOL if c in df.columns and c not in FIRMWARE_FEATURES]
 if unused:
     print(f"Not used (see FIRMWARE_FEATURES comment): {unused}")
-if "speed" in df.columns and df["speed"].nunique() > 1:
+USE_SPEED = False   # speed = lookup of PWM, not measured; PWM coverage differs per class -> confound
+if USE_SPEED and "speed" in df.columns and df["speed"].nunique() > 1:
     features.append("speed")
     print("'speed' varies in the data - included as a feature")
 else:
-    print("'speed' is constant (single PWM) - excluded; collect more PWM levels to use it")
+    print("'speed' excluded (USE_SPEED = False)")
 print("Features used:", features, "\n")
 
 X = df[features]
@@ -206,16 +207,19 @@ else:
         "}\n\n"
         "// ── Terrain driving profiles (from sim ADAPTIVE_POLICY) ─────────────────────\n"
         "struct TerrainProfile {\n"
-        "    uint8_t maxPwm;\n"
+        "    uint8_t targetPwm;    // Optimal cruising PWM for this terrain\n"
+        "    uint8_t maxPwm;       // Hard safety ceiling\n"
         "    float   accelRamp_s;\n"
         "    float   turnGain;\n"
         "};\n\n"
         "// Ordered alphabetically: carpet, gravel, pavement, tile\n"
+        "// targetPwm: comfortable adaptive cruise speed per terrain\n"
+        "// maxPwm:    absolute ceiling (never exceed, even if user sets higher)\n"
         "static const TerrainProfile TERRAIN_PROFILES[] = {\n"
-        "    {170, 0.40f, 0.80f},  // carpet\n"
-        "    {130, 0.60f, 0.60f},  // gravel\n"
-        "    {190, 0.30f, 0.90f},  // pavement\n"
-        "    {220, 0.20f, 1.00f},  // tile\n"
+        "    {150, 170, 0.40f, 0.80f},  // carpet  — moderate grip, mid speed\n"
+        "    {110, 130, 0.60f, 0.60f},  // gravel  — loose surface, go slow\n"
+        "    {170, 200, 0.30f, 0.90f},  // pavement — best grip, fast but safe\n"
+        "    {200, 220, 0.20f, 1.00f},  // tile    — very smooth, highest speed\n"
         "};\n"
         "static const char* TERRAIN_NAMES[] = {\"carpet\", \"gravel\", \"pavement\", \"tile\"};\n\n"
         "// ── Extern declarations (defined in rover_firmware.ino) ─────────────────────\n"
